@@ -279,7 +279,7 @@ function drawFilm(ctx, w, h) {
   ctx.setLineDash([5, 4]); ctx.lineWidth = 1; ctx.strokeStyle = css("--ink"); ctx.globalAlpha = .5;
   const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(w, yl); ctx.stroke();
   ctx.setLineDash([]); ctx.globalAlpha = 1;
-  if (S.cells) note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
+  if (S.cells && S.stage !== "relax") note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
   if (d.model) drawHead(ctx, d, sx, sy, h);
   if (S.stage === "read") drawReaderBand(ctx, w, h, sy);
   if (view !== "grains") {   // atom views show the nearest snapshot: say so on the image when it is not this time
@@ -422,7 +422,7 @@ function filmTip(x, y) {
     }
   }
   if (d.model) rows.push(["laser T now", `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], ["peak laser T", `${fmt(d.model.peakT(x, y), 0)} K`]);
-  if (S.cells && S.pol && d.g && cellGeom()) {
+  if (S.cells && S.pol && S.stage !== "relax" && d.g && cellGeom()) {
     const C = cellGeom(), p = C.p, t = Math.min(p.n_tracks - 1, Math.max(0, Math.floor((y - p.pad) / p.TW))), b = Math.floor((x + C.lag) / p.BL);
     const c = b >= 0 && b < p.bits_per_track ? cellParts(d)[t * p.bits_per_track + b] : null;
     if (c) rows.push([`bit ${b + 1} mean m<sub>z</sub>`, `${fmt(cellMz(d, c, S.f), 3)} ${c.want ? (bitOk(d, c, S.f) ? "✓" : "✗") : ""}`]);
@@ -797,7 +797,9 @@ function stageFacts(st) {
   }
   if (st === "relax") return [["integrator", e.input["sim:integrator"]], ["temperature", `${e.input["sim:temperature"] || "–"} K`],
     ["steps", d.nF > 1 ? Math.round(d.time[d.nF - 1] / e.dt).toLocaleString() : "–"], ["grains", d.nG]];
-  return [["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
+  const bits = d.g && cellGeom() ? cellParts(d).filter(c => c.want && c.parts.length) : [];
+  return [bits.length && ["bits ✓ (written state)", `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
+    ["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
     e.dipole && ["cell size", `${e.dipole.cell_nm} nm`]];
 }
 function legendHtml() {
@@ -927,6 +929,7 @@ function syncControls() {
   const hasAn = !!(d.an || (D.write && D.write.an));
   for (const [id, v] of [["c-mz", "mz"], ["c-agree", "agree"], ["c-peak", "peak"], ["c-minm", "minm"]]) {
     $(id).setAttribute("aria-pressed", S.colour === v);
+    $(id).hidden = v === "agree" && S.stage === "relax";   // nothing written yet
     $(id).disabled = (v === "peak" && !d.model) || (v === "minm" && !(d.g || d.snaps)) || (v === "agree" && !hasAn);
   }
   $("layer-ctl").hidden = S.view !== "layer" || !d.snaps;
@@ -934,7 +937,7 @@ function syncControls() {
   $("z-ctl").hidden = $("w-ctl").hidden = S.stage !== "read" || !d.e.dipole;
   if (d.e.dipole) { $("zsel").max = d.e.dipole.nz - 2; $("zsel").value = S.z; $("z-out").textContent = zText(S.z); $("w-out").textContent = `${S.rw} nm`; }
   $("st-all").checked = S.stAll;
-  $("cells-ctl").hidden = !(S.M.stages.write && S.M.stages.write.hamr);
+  $("cells-ctl").hidden = !(S.M.stages.write && S.M.stages.write.hamr) || S.stage === "relax";   // nothing written yet
   $("pol-ctl").hidden = $("cells-ctl").hidden || !S.cells || !d.g;
 }
 function bindControls() {
@@ -1022,7 +1025,7 @@ async function setStage(st) {
   if (st === "read" && S.M.stages.write && S.M.stages.write.hamr) { const p = S.M.stages.write.hamr; S.ysec = p.TW * .5 + p.pad; }
   if (e.dipole) S.z = Math.min(e.dipole.nz - 2, Math.round(e.size_nm[2] * .55 / e.dipole.cell_nm));
   if (S.view !== "grains" && !d.snaps) S.view = "grains";
-  if (S.colour === "peak" && !d.model) S.colour = "mz";
+  if ((S.colour === "peak" && !d.model) || (S.colour === "agree" && st === "relax")) S.colour = "mz";
   document.querySelectorAll("#chain button").forEach(b => b.setAttribute("aria-pressed", b.dataset.stage === st));
   try { history.replaceState(null, "", "#" + st); } catch (err) { /* sandboxed */ }
   buildLanes(); syncControls(); drawAnalysis(); drawDetails(); redraw();
