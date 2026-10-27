@@ -26,7 +26,7 @@ async function tryBuf(path) { try { return await getBuf(path); } catch (e) { ret
 
 // ------------------------------------------------------------------------------------------------ state
 const S = { M: null, stage: null, f: 0, fa: 0, view: "grains", colour: "mz", layer: 0, sel: -1, hov: -1, ysec: 0,
-            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, hx: null };
+            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, pol: false, hx: null };
 const D = {};                                                    // per-stage data, filled by loadStage
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -293,11 +293,38 @@ function drawFilm(ctx, w, h) {
   }
   setNote("map", [note, `section y ${fmt(S.ysec)} nm`]);
 }
-// bit cells (each bit's region, shifted upstream by the freeze lag) and the band hotter than Tc, on every track
-function drawCells(ctx, sx, sy, h) {
-  const W = S.M.stages.write; if (!W || !W.hamr) return "";
+// bit cells: each bit's region (shifted upstream by the freeze lag) on every track; the band hotter than Tc
+function cellGeom() {
+  const W = S.M.stages.write; if (!W || !W.hamr) return null;
   const p = W.hamr, lag = W.freeze_lag_nm || 0, Tc = W.Tc;
   const half = Tc > p.Tmin && Tc < p.Tmax ? p.sigma_y * Math.sqrt(2 * Math.log((p.Tmax - p.Tmin) / (Tc - p.Tmin))) : 0;
+  return { p, lag, Tc, half };
+}
+// atom-weighted grain shares of every bit cell, inside the writable band (|y - track centre| <= half, or the
+// whole track without a Tc): [{t, b, want, parts: [[grain, weight], ...]}], from the grain map when there is one
+const _cells = {};
+function cellParts(d) {
+  if (_cells[d.st]) return _cells[d.st];
+  const C = cellGeom(), p = C.p, out = [], M = d.e.grain_map, e = d.e;
+  for (let t = 0; t < p.n_tracks; t++) for (let b = 0; b < p.bits_per_track; b++) {
+    const yc = p.pad + (t + .5) * p.TW, hw = C.half || p.TW / 2, x0 = b * p.BL - C.lag, x1 = x0 + p.BL;
+    const w = new Map();
+    if (M && d.gmap) {
+      const P = M.pitch_nm;
+      for (let iy = Math.max(0, Math.floor((yc - hw) / P)); iy < Math.min(M.ny, Math.ceil((yc + hw) / P)); iy++)
+        for (let ix = Math.floor(x0 / P); ix < Math.ceil(x1 / P); ix++) {
+          const g = d.gmap[iy * M.nx + ((ix % M.nx) + M.nx) % M.nx]; if (g >= 0) w.set(g, (w.get(g) || 0) + 1);
+        }
+    } else e.grains.x.forEach((x, g) => { const y = e.grains.y[g]; if (x >= x0 && x < x1 && Math.abs(y - yc) <= hw) w.set(g, e.grains.atoms[g]); });
+    out.push({ t, b, want: Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), parts: [...w] });
+  }
+  return (_cells[d.st] = out);
+}
+const cellMz = (d, c, f) => { let s = 0, n = 0; for (const [g, w] of c.parts) { s += w * gmz(d, f, g); n += w; } return n ? s / n : 0; };
+const bitOk = (d, c, f) => c.want !== 0 && c.parts.length > 0 && Math.sign(cellMz(d, c, f)) === c.want;
+function drawCells(ctx, sx, sy, h) {
+  const C = cellGeom(); if (!C) return "";
+  const { p, lag, Tc, half } = C;
   ctx.font = `600 10.5px ${css("--font")}`; ctx.textAlign = "center";
   for (let t = 0; t < p.n_tracks; t++) {
     const y0 = p.pad + t * p.TW, y1 = y0 + p.TW, yc = y0 + p.TW / 2;
@@ -309,7 +336,23 @@ function drawCells(ctx, sx, sy, h) {
     ctx.globalAlpha = 1; ctx.fillStyle = css("--ink");
     for (let b = 0; b < p.bits_per_track; b++) if (p.BL * sx > 14) ctx.fillText(b + 1, ((b + .5) * p.BL - lag) * sx, h - y1 * sy + 12);
   }
-  return `bit cells shifted ${fmt(lag)} nm upstream; solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm`;
+  const d = cur();
+  if (S.pol && d.g) {   // outline each cell's writable part in the colour of its mean m_z; mark it against the bit
+    const hw = half || p.TW / 2;
+    for (const c of cellParts(d)) {
+      const v = cellMz(d, c, S.f), yc = p.pad + (c.t + .5) * p.TW, x0 = (c.b * p.BL - lag) * sx;
+      const rx = x0 + 2, ry = h - (yc + hw) * sy + 2, rw = p.BL * sx - 4, rh = 2 * hw * sy - 4;
+      ctx.strokeStyle = css("--ink"); ctx.lineWidth = 5; ctx.strokeRect(rx, ry, rw, rh);              // halo
+      ctx.strokeStyle = Math.abs(v) < .05 ? css("--mid") : css(v > 0 ? "--up" : "--down"); ctx.lineWidth = 3; ctx.strokeRect(rx, ry, rw, rh);
+      if (c.want && p.BL * sx > 10) {
+        const ok = bitOk(d, c, S.f), tx = x0 + p.BL * sx / 2, ty = h - (yc - hw) * sy + 16;
+        ctx.font = `800 14px ${css("--font")}`; ctx.lineWidth = 3; ctx.strokeStyle = css("--lane");
+        ctx.strokeText(ok ? "✓" : "✗", tx, ty); ctx.fillStyle = css(ok ? "--ok" : "--bad"); ctx.fillText(ok ? "✓" : "✗", tx, ty);
+      }
+    }
+  }
+  return `bit cells shifted ${fmt(lag)} nm upstream; solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm` +
+    (S.pol ? "; outline: sign of the cell's mean m_z inside the band (grey: |m_z| < 0.05)" : "");
 }
 function drawHead(ctx, d, sx, sy, h) {
   const m = d.model, p = m.p, step = d.steps[S.f], hd = m.head(step);
@@ -379,6 +422,11 @@ function filmTip(x, y) {
     }
   }
   if (d.model) rows.push(["laser T now", `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], ["peak laser T", `${fmt(d.model.peakT(x, y), 0)} K`]);
+  if (S.cells && S.pol && d.g && cellGeom()) {
+    const C = cellGeom(), p = C.p, t = Math.min(p.n_tracks - 1, Math.max(0, Math.floor((y - p.pad) / p.TW))), b = Math.floor((x + C.lag) / p.BL);
+    const c = b >= 0 && b < p.bits_per_track ? cellParts(d)[t * p.bits_per_track + b] : null;
+    if (c) rows.push([`bit ${b + 1} mean m<sub>z</sub>`, `${fmt(cellMz(d, c, S.f), 3)} ${c.want ? (bitOk(d, c, S.f) ? "✓" : "✗") : ""}`]);
+  }
   if (g >= 0) {
     rows.push(["grain", e.grains.id[g]]);
     if (d.g) rows.push(["m<sub>z</sub>", fmt(gmz(d, S.f, g), 3)], ["|m|", fmt(gml(d, S.f, g), 3)]);
@@ -740,7 +788,10 @@ function stageFacts(st) {
     const an = e.analysis.grains, heated = an.filter(melted), ok = heated.filter(a => a.correct).length;
     let now = 0; an.forEach((a, g) => { if (melted(a) && okAt(d, S.f, a, g)) now++; });
     return [[`✓ at ${timeText(d, d.time[S.f])}`, `${now} / ${heated.length} (${fmt(100 * now / heated.length, 0)} %)`],
-      ["✓ at end", `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`], ["freezing T (measured)", `${fmt(e.Tc, 0)} K`],
+      ["✓ at end", `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`],
+      ...(() => { const cs = cellParts(d).filter(c => c.want && c.parts.length); if (!cs.length) return [];
+        const n = f => cs.filter(c => bitOk(d, c, f)).length;
+        return [[`bits ✓ at ${timeText(d, d.time[S.f])}`, `${n(S.f)} / ${cs.length}`], ["bits ✓ at end", `${n(d.nF - 1)} / ${cs.length}`]]; })(), ["freezing T (measured)", `${fmt(e.Tc, 0)} K`],
       ["freeze lag", `${fmt(e.freeze_lag_nm)} nm`], ["peak head field", `${fmt(e.hamr.Hpeak, 2)} T`], ["head speed", `${fmt(e.hamr.v, 0)} m/s`],
       ["bits", e.hamr.bits_per_track * e.hamr.n_tracks], ["bit length", `${fmt(e.hamr.BL)} nm`], ["laser T", `${fmt(e.hamr.Tmin, 0)}–${fmt(e.hamr.Tmax, 0)} K`]];
   }
@@ -884,6 +935,7 @@ function syncControls() {
   if (d.e.dipole) { $("zsel").max = d.e.dipole.nz - 2; $("zsel").value = S.z; $("z-out").textContent = zText(S.z); $("w-out").textContent = `${S.rw} nm`; }
   $("st-all").checked = S.stAll;
   $("cells-ctl").hidden = !(S.M.stages.write && S.M.stages.write.hamr);
+  $("pol-ctl").hidden = $("cells-ctl").hidden || !S.cells || !d.g;
 }
 function bindControls() {
   [["v-grains", "grains"], ["v-atoms", "atoms"], ["v-layer", "layer"]].forEach(([id, v]) => $(id).onclick = () => { S.view = v; syncControls(); redraw(); });
@@ -895,7 +947,8 @@ function bindControls() {
   $("play").onclick = togglePlay;
   $("to-start").onclick = () => seek(0);
   $("to-end").onclick = () => seek(cur().nF - 1);
-  $("cells").onchange = ev => { S.cells = ev.target.checked; redraw(); };
+  $("cells").onchange = ev => { S.cells = ev.target.checked; syncControls(); redraw(); };
+  $("pol").onchange = ev => { S.pol = ev.target.checked; redraw(); };
   $("theme").onclick = () => {   // header button; the artifact host may also set data-theme
     const root = document.documentElement, dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     root.dataset.theme = dark ? "light" : "dark";

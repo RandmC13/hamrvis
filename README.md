@@ -97,6 +97,9 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
     reached. Laser isotherms (bold: freezing temperature) and the head-field box with its direction and strength.
     The dashed line is the section line: click the film to move it. *Bit cells* overlays every bit's region on
     every track and the band hotter than the freezing temperature (the part of the track that can be written).
+    *Bit polarity* outlines each cell's part inside that band in the colour of its mean m_z (atom-weighted over
+    the grain pieces it contains, at the current time) and marks it ✓ / ✗ against the bit; the side panel counts
+    correct bits now and at the end.
     Atom views show the nearest snapshot; its time is printed on the image when it differs from the timeline.
   - *Transport* directly under the film: start / play / end (Home, space, End), 0.1x to 30x, step (arrow keys,
     shift for 50 frames).
