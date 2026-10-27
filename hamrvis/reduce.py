@@ -57,28 +57,38 @@ def _pitch(values, tol=1e-3):
     return float(d.min()) if len(d) else 1.0
 
 
-class Grid:
-    """Pixel grids: top-down columns at the atomic in-plane pitch, and a per-layer volume at twice that pitch
-    (one atomic site per layer per pixel can be empty in non-cubic lattices; 2x2 sites never are inside a grain)."""
+TOP_MAX = 4e6      # top-down pixels per snapshot before the column map is coarsened
+LAYER_MAX = 2.5e6  # per-layer cells per snapshot before the layer grid is coarsened
 
-    def __init__(self, Lx_nm, Ly_nm, xyz):
+
+class Grid:
+    """Pixel grids on the atomic in-plane pitch p (smallest spacing between atom x coordinates):
+    top-down columns of tf x tf sites (tf = 1, i.e. single atom columns, unless that exceeds TOP_MAX pixels) and a
+    per-layer grid of lf x lf sites per atomic layer (lf = 2 by default: one site per layer can be empty in
+    non-cubic lattices, 2 x 2 sites never are inside a grain; larger when LAYER_MAX would be exceeded)."""
+
+    def __init__(self, Lx_nm, Ly_nm, xyz, layer_factor=None):
         self.p = _pitch(xyz[:, 0])                                # A
         self.pz = _pitch(xyz[:, 2])
         self.z0 = float(xyz[:, 2].min())
-        self.nx = int(round(Lx_nm * 10 / self.p))
-        self.ny = int(round(Ly_nm * 10 / self.p))
+        self.nx0 = int(round(Lx_nm * 10 / self.p))
+        self.ny0 = int(round(Ly_nm * 10 / self.p))
         self.nz = int(round((xyz[:, 2].max() - self.z0) / self.pz)) + 1
-        self.vx, self.vy = (self.nx + 1) // 2, (self.ny + 1) // 2
+        self.tf = max(1, math.ceil(math.sqrt(self.nx0 * self.ny0 / TOP_MAX)))
+        self.lf = layer_factor or max(2, math.ceil(math.sqrt(self.nx0 * self.ny0 * self.nz / LAYER_MAX)))
+        self.nx, self.ny = -(-self.nx0 // self.tf), -(-self.ny0 // self.tf)
+        self.vx, self.vy = -(-self.nx0 // self.lf), -(-self.ny0 // self.lf)
 
     def indices(self, xyz):
-        ix = np.rint(xyz[:, 0] / self.p).astype(np.int64) % self.nx
-        iy = np.rint(xyz[:, 1] / self.p).astype(np.int64) % self.ny
+        ix = np.rint(xyz[:, 0] / self.p).astype(np.int64) % self.nx0
+        iy = np.rint(xyz[:, 1] / self.p).astype(np.int64) % self.ny0
         iz = np.clip(np.rint((xyz[:, 2] - self.z0) / self.pz).astype(np.int64), 0, self.nz - 1)
-        return iy * self.nx + ix, (iz * self.vy + iy // 2) * self.vx + ix // 2
+        return (iy // self.tf) * self.nx + ix // self.tf, (iz * self.vy + iy // self.lf) * self.vx + ix // self.lf
 
     def info(self):
-        return dict(pitch_nm=self.p / 10, pitch_z_nm=self.pz / 10, z0_nm=self.z0 / 10, nx=self.nx, ny=self.ny,
-                    nz=self.nz, vx=self.vx, vy=self.vy)
+        return dict(pitch_nm=self.p * self.tf / 10, layer_pitch_nm=self.p * self.lf / 10, atom_pitch_nm=self.p / 10,
+                    pitch_z_nm=self.pz / 10, z0_nm=self.z0 / 10, nx=self.nx, ny=self.ny, nz=self.nz, vx=self.vx,
+                    vy=self.vy)
 
 
 def _q8(sums, count):
@@ -98,11 +108,18 @@ _W = {}   # per-worker state, inherited through fork
 
 
 def _bin_snapshot(job):
+    try:
+        return _bin_snapshot_checked(job)
+    except (IOError, ValueError) as err:          # truncated copy, missing file
+        return job[0], None, None, str(err)
+
+
+def _bin_snapshot_checked(job):
     idx, files, out_dir = job
     g, nG = _W["grid"], _W["n_grains"]
     top = np.zeros((3, g.ny * g.nx))
     vol = np.zeros((3, g.nz * g.vy * g.vx)) if _W["volume"] else None
-    gs = np.zeros((3, nG))
+    gs = np.zeros((3, nG + 1))                     # last bin: atoms of no listed grain
     for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
         s = vp.read_spins(f)
         if len(s) != len(mask):
@@ -110,7 +127,7 @@ def _bin_snapshot(job):
         s = s[mask]
         for c in range(3):
             top[c] += np.bincount(kt, s[:, c], minlength=top.shape[1])
-            gs[c] += np.bincount(gi, s[:, c], minlength=nG)
+            gs[c] += np.bincount(gi, s[:, c], minlength=nG + 1)
             if vol is not None:
                 vol[c] += np.bincount(kv, s[:, c], minlength=vol.shape[1])
     qt = _q8(top, _W["ct"])
@@ -124,7 +141,8 @@ def _bin_snapshot(job):
     return idx, m.astype(np.float32), gs, float(q_err)
 
 
-def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None):
+def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None,
+                 layer_factor=None):
     """From the atom coordinates: exact top-down grain map, grain centres; then bin every spin snapshot onto the
     grids and check each snapshot's per-grain mean spin against grain.txt at the same time step."""
     cfiles = vp.coord_files(run_dir)
@@ -138,8 +156,12 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
     log(f"  reading {len(cfiles)} coordinate files")
     coords = [vp.read_coords(f) for f in cfiles]
     allmag = np.concatenate([xyz[np.isin(t, mtypes)] for t, xyz, _ in coords])
-    grid = Grid(Lx, Ly, allmag)
+    grid = Grid(Lx, Ly, allmag, layer_factor)
     del allmag
+    have_ids = all(g is not None for _, _, g in coords)
+    if not have_ids:
+        log("  WARNING: the coordinate files hold no grain IDs (older text format): grain shapes stay VAMPIRE's "
+            "approximate Voronoi outlines and snapshots are not checked against grain.txt")
     bins, ct, cv = [], np.zeros(grid.ny * grid.nx), np.zeros(grid.nz * grid.vy * grid.vx)
     pairs = []
     cx, sx, cy, sy, na = (np.zeros(nG + 1) for _ in range(5))
@@ -160,27 +182,31 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
 
     # grain map: the grain of the magnetic atoms in each column (columns hold one grain in a columnar film; the
     # majority grain otherwise); -1 = no magnetic atom
-    key, cnt = np.unique(np.concatenate(pairs), return_counts=True)
+    if have_ids:
+        key, cnt = np.unique(np.concatenate(pairs), return_counts=True)
+        col, gr = key // (nG + 1), key % (nG + 1)
+        order = np.lexsort((-cnt, col))                   # per column, most atoms first
+        col, gr = col[order], gr[order]
+        first = np.r_[True, col[1:] != col[:-1]]
+        gm = np.full(grid.ny * grid.nx, -1, np.int64)
+        gm[col[first]] = np.where(gr[first] == nG, -1, gr[first])
+        gm.astype(np.int16).tofile(os.path.join(out_dir, "grain_map.i16"))
+        entry["grain_map"] = dict(nx=grid.nx, ny=grid.ny, pitch_nm=grid.p * grid.tf / 10,
+                                  mixed_columns=int(len(col) - first.sum()))
     del pairs
-    col, gr = key // (nG + 1), key % (nG + 1)
-    order = np.lexsort((-cnt, col))                       # per column, most atoms first
-    col, gr = col[order], gr[order]
-    first = np.r_[True, col[1:] != col[:-1]]
-    gm = np.full(grid.ny * grid.nx, -1, np.int64)
-    gm[col[first]] = np.where(gr[first] == nG, -1, gr[first])
-    mixed = int(len(col) - first.sum())
-    gm.astype(np.int16).tofile(os.path.join(out_dir, "grain_map.i16"))
-    entry["grain_map"] = dict(nx=grid.nx, ny=grid.ny, pitch_nm=grid.p / 10, mixed_columns=mixed)
     # periodic-aware centres (circular means) and magnetic atom counts replace grain-coordinates.txt values,
     # which include non-magnetic atoms assigned to a grain
     ok = na[:nG] > 0
+    if not have_ids:
+        ok[:] = False
     gx = (np.arctan2(sx[:nG], cx[:nG]) % (2 * np.pi)) * Lx / (2 * np.pi)
     gy = (np.arctan2(sy[:nG], cy[:nG]) % (2 * np.pi)) * Ly / (2 * np.pi)
     G = entry["grains"]
     G["x"] = np.round(np.where(ok, gx, G["x"]), 3).tolist()
     G["y"] = np.round(np.where(ok, gy, G["y"]), 3).tolist()
-    G["magnetic_atoms"] = na[:nG].astype(int).tolist()
-    G.pop("outline", None)
+    if have_ids:
+        G["magnetic_atoms"] = na[:nG].astype(int).tolist()
+        G.pop("outline", None)
 
     snaps = vp.snapshots(run_dir)
     if not snaps:
@@ -196,19 +222,23 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
     step_of = {i: int(round(t / entry["dt"])) for i, t, _ in snaps}
     workers = workers or min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
     min_m = np.full(ct.size, np.inf, np.float32)
-    checks, q_max, t0 = [], 0.0, time.time()
+    checks, q_max, t0, bad = [], 0.0, time.time(), set()
     with multiprocessing.get_context("fork").Pool(workers) as pool:
         for n, (idx, m, gs, q_err) in enumerate(pool.imap_unordered(_bin_snapshot, jobs), 1):
+            if m is None:
+                log(f"  WARNING: snapshot {idx} skipped: {q_err}")
+                bad.add(idx)
+                continue
             np.minimum(min_m, m, out=min_m)
             q_max = max(q_max, q_err)
-            if grain_m is not None:
+            if grain_m is not None and have_ids:
                 # per-grain means against grain.txt at the same step (they agree exactly then), else one step
                 # earlier: VAMPIRE writes snapshot k at step k * rate + 1, one step after the grain row of that output
                 for lag in (0, 1):
                     f = np.nonzero(grain_steps == step_of[idx] - lag)[0]
                     if len(f):
                         ref = grain_m[f[0], :, :3] * grain_m[f[0], :, 3:4]       # direction x |m|
-                        mine = (gs / np.maximum(na[:nG], 1)).T
+                        mine = (gs[:, :nG] / np.maximum(na[:nG], 1)).T
                         checks.append((idx, lag, float(np.abs(mine - ref)[ok].max())))
                         break
             if n % max(1, len(jobs) // 20) == 0 or n == len(jobs):
@@ -217,7 +247,8 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
     _W.clear()
     min_m[ct == 0] = 0
     np.rint(np.clip(min_m, 0, 1) * 255).astype(np.uint8).tofile(os.path.join(out_dir, "min_m.u8"))
-    entry["snapshots"] = dict(grid=grid.info(), volume=volume, frames=[dict(index=i, time=t) for i, t, _ in snaps])
+    entry["snapshots"] = dict(grid=grid.info(), volume=volume, skipped=sorted(bad),
+                              frames=[dict(index=i, time=t) for i, t, _ in snaps if i not in bad])
     same = [c[2] for c in checks if c[1] == 0]
     prev = [c[2] for c in checks if c[1] == 1]
     entry["checks"] = dict(column_rounding_max=q_max,
@@ -242,11 +273,19 @@ def reduce_tables(run_dir, out_dir, entry):
         outline=[None if o is None else np.round(o, 3).tolist() for o in outlines])
     if os.path.exists(os.path.join(run_dir, "grain.txt")):
         log("  parsing grain.txt")
-        n_lead, lead, m = vp.read_grain_file(run_dir, len(gc))
+        cols, m = vp.read_grain_file(run_dir, len(gc))
+        if "time" in cols:
+            t = cols["time"]
+        elif "step" in cols:
+            t = cols["step"] * entry["dt"]
+        else:   # neither grain:real-time nor grain:time-steps: frames are written every grain:output-rate steps
+            rate = vp.Input(run_dir).num("grain:output-rate", 1, "s")
+            t = (np.arange(len(m)) + 1) * rate * entry["dt"]
+            entry["grain_time_note"] = "grain.txt has no time column: frame times assumed from grain:output-rate"
+        lead = np.stack([t, cols.get("temperature", np.full(len(m), np.nan))], axis=1)
         np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
         lead.tofile(os.path.join(out_dir, "grain_lead.f64"))
-        names = ["time", "temperature", "extra"][:n_lead]
-        entry["grain_series"] = dict(frames=len(m), lead=names)
+        entry["grain_series"] = dict(frames=len(m), lead=["time", "temperature"], columns=list(cols))
         return lead, m
     return None, None
 
@@ -362,7 +401,7 @@ def find_runs(paths):
     return runs
 
 
-def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None):
+def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None):
     runs = find_runs(paths)
     if not runs:
         raise SystemExit(f"no run directories (folders with an 'input' file) in {paths}")
@@ -394,7 +433,7 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None):
                              for f in ("input", "output", "grain.txt", "dipole-field.txt") if os.path.exists(os.path.join(run, f))}
         lead, m = reduce_tables(run, sd, e)
         gsteps = np.rint(lead[:, 0] / e["dt"]).astype(np.int64) if lead is not None else None
-        reduce_atoms(run, sd, e, gsteps, m, volume, every, workers)
+        reduce_atoms(run, sd, e, gsteps, m, volume, every, workers, layer_factor)
         if stage == "write":
             h = vp.Hamr(run)
             e["hamr"] = h.params()

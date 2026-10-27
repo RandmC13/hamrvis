@@ -107,28 +107,36 @@ def grain_outlines(coords, shapes):
     return res
 
 
+# grain.txt columns per grain:* keyword (src/vio/match_grain_list.cpp), written in the order of the input file
+_GRAIN_LEAD = {"time-steps": ["step"], "real-time": ["time"], "temperature": ["temperature"],
+               "electron-temperature": ["temperature"], "phonon-temperature": ["phonon_temperature"],
+               "applied-field-strength": ["field"], "applied-field-unit-vector": ["field_ux", "field_uy", "field_uz"]}
+
+
 def read_grain_file(run_dir, n_grains):
     """Per-frame grain data from grain.txt.
 
-    Columns: optional real time / temperature, then 4 per grain (mx, my, mz direction, |m|), then optionally 4 per
-    grain per material. Returns (step-or-time column float64 [frames], m float32 [frames, grains, 4]).
-    Only the first leading column and the per-grain block are parsed, which skips the (large) material block."""
-    path = os.path.join(run_dir, "grain.txt")
-    first = next(l for l in open(path) if l.strip() and not l.startswith("#"))
-    ncol = len(first.split())
-    n_lead = None
-    for lead in (0, 1, 2, 3):   # leading columns = whatever leaves a multiple of 4 per grain
-        rest = ncol - lead
-        if rest >= 4 * n_grains and rest % (4 * n_grains) == 0:
-            n_lead = lead
+    The columns follow the input's grain:* keywords in order: single columns (step, time, temperature, field) and
+    then blocks per grain, of which grain:magnetisation gives 4 per grain (mx, my, mz direction, |m|).
+    Returns ({name: float64 [frames]} of the columns before the magnetisation block, float32 [frames, grains, 4])."""
+    keys = [k.split(":", 1)[1] for k in Input(run_dir).keys if k.startswith("grain:")]
+    names = []
+    for k in keys:
+        if k == "magnetisation":
             break
-    if n_lead is None:
-        raise ValueError(f"grain.txt has {ncol} columns, not leading columns + 4 x {n_grains} grains (x materials)")
-    cols = list(range(n_lead)) + list(range(n_lead, n_lead + 4 * n_grains))
+        if k in _GRAIN_LEAD:
+            names += _GRAIN_LEAD[k]
+        elif k != "output-rate":
+            raise ValueError(f"grain:{k} comes before grain:magnetisation in the input; its column count is not "
+                             f"known to hamrvis (add it to _GRAIN_LEAD in hamrvis/vampire.py)")
+    else:
+        raise ValueError("the input has no grain:magnetisation, so grain.txt holds no grain magnetisation")
+    path = os.path.join(run_dir, "grain.txt")
+    cols = list(range(len(names) + 4 * n_grains))
     d = np.loadtxt(path, comments="#", usecols=cols, ndmin=2, dtype=np.float64)
-    lead = d[:, :n_lead]
-    m = d[:, n_lead:].reshape(len(d), n_grains, 4).astype(np.float32)
-    return n_lead, lead, m
+    lead = {n: d[:, i] for i, n in enumerate(names)}
+    m = d[:, len(names):].reshape(len(d), n_grains, 4).astype(np.float32)
+    return lead, m
 
 
 def read_dipole_cells(run_dir):
@@ -245,18 +253,24 @@ class Hamr:
         self.box_y = min(n("hamr:head-field-y", 20.0), self.Ly)
         self.sigma_x = self.fwhm_x / math.sqrt(8 * math.log(2))
         self.sigma_y = self.fwhm_y / math.sqrt(8 * math.log(2))
-        if inp.has("hamr:bit-sequence"):
-            self.sequence = [int(s) for s in inp.str("hamr:bit-sequence").split(",")]
-        else:  # single-tone-predefined
-            nb = int(n("hamr:number-of-bits", 0, "s"))
-            self.sequence = [-1 if i % 2 == 0 else 1 for i in range(nb)]
+        # tracks, bits and sequence as src/hamr/initialize.cpp and bit_sequence.cpp decide them (lengths in A there)
+        self.bits_per_track = int(math.floor((self.Lx - 0.1) / self.BL))
+        max_tracks = int(math.floor((self.Ly - 0.1 - 2 * self.pad) / self.TW))
+        n_bits = int(n("hamr:number-of-bits", 0, "s"))
+        try_tracks = int(round(n_bits / self.bits_per_track)) if self.bits_per_track else 0
+        self.n_tracks = try_tracks if try_tracks < max_tracks else max_tracks
+        if inp.str("hamr:bit-sequence-type", "user-defined") == "single-tone-predefined" or not inp.has("hamr:bit-sequence"):
+            seq = [-1 if i % 2 == 0 else 1 for i in range(n_bits)]
+        else:
+            seq = [int(v) for v in re.findall(r"-?\d+", inp.str("hamr:bit-sequence"))]
+            seq = seq[:n_bits] if n_bits < len(seq) else seq
+        total = self.n_tracks * self.bits_per_track
+        self.sequence = (seq + [0] * total)[:total]                    # trimmed, or padded with field-free bits
         vdt = self.v * 1e9 * self.dt                                     # nm per step
         self.step_nm = vdt
         self.nb = int(round(self.BL / vdt))
         self.ne = int(round(self.BL / 2 / vdt)) + int(round(self.NPS / vdt))
-        self.bits_per_track = int(math.floor((self.Lx - 0.1) / self.BL))
         self.nt = self.bits_per_track * self.nb + 2 * self.ne
-        self.n_tracks = max(1, int(round(len(self.sequence) / self.bits_per_track)))
         self.laser_steps = self.n_tracks * self.nt
 
     def params(self):
@@ -265,7 +279,7 @@ class Hamr:
                 "fwhm_y", "box_x", "box_y", "sigma_x", "sigma_y", "step_nm", "nb", "ne", "bits_per_track", "nt",
                 "n_tracks", "laser_steps")
         p = {k: getattr(self, k) for k in keys}
-        p["sequence"] = self.sequence[: self.n_tracks * self.bits_per_track]
+        p["sequence"] = self.sequence
         return p
 
     def head(self, steps):

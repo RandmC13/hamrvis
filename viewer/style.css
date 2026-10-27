@@ -17,7 +17,7 @@
   /* sequential (peak temperature, lowest |m|) */
   --s0: #fbf7e4; --s1: #f2c46d; --s2: #e0703a; --s3: #8e2a26; --s4: #3a1218;
   --font: "Instrument Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --gutter: 92px;
+  --gutter: 112px;
   --inspector: 320px;
   color-scheme: light;
 }
@@ -57,8 +57,10 @@ button, select, input { font: inherit; color: inherit; }
 /* ---------------------------------------------------------------- top bar */
 .top { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 28px; padding-block: 18px 14px; }
 .run { min-width: 0; }
-.run h1 { margin: 0; font-weight: 700; font-stretch: 78%; font-size: 30px; line-height: 1; letter-spacing: -.01em; }
+.run h1 { display: flex; align-items: center; gap: 10px; margin: 0; font-weight: 700; font-stretch: 78%; font-size: 30px; line-height: 1; letter-spacing: -.01em; }
 .run p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.icon { border: 1px solid var(--rule); background: transparent; border-radius: 50%; width: 28px; height: 28px; padding: 0;
+  font-size: 15px; line-height: 1; cursor: pointer; color: var(--muted); font-stretch: 100%; }
 .chain { display: flex; align-items: stretch; gap: 0; margin-left: auto; }
 .chain button {
   display: grid; text-align: left; gap: 1px; padding: 7px 14px 7px 12px; border: 1px solid var(--rule);
@@ -108,9 +110,10 @@ button, select, input { font: inherit; color: inherit; }
 .transport { display: grid; grid-template-columns: var(--gutter) minmax(0, 1fr); margin: 4px 0 14px; align-items: center; }
 #lanes-bottom { margin-top: 4px; }
 #lanes-bottom[hidden] + .axis { display: none; }
-.transport .play { display: flex; align-items: center; gap: 6px; }
+.transport .play { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-right: 8px; }
+.transport .play button.step { width: 26px; height: 26px; border-color: var(--rule); background: transparent; color: var(--ink); font-size: 11px; }
 .transport .play button {
-  width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--ink); background: var(--ink); color: var(--lane);
+  width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--ink); background: var(--ink); color: var(--lane);
   cursor: pointer; display: grid; place-items: center;
 }
 .transport select { border: 1px solid var(--rule); background: transparent; border-radius: 6px; padding: 2px 2px; font-size: 12.5px; }

@@ -59,6 +59,23 @@ The reducer reads what VAMPIRE writes; the more of it there is, the more the vie
 | `dipole:output-dipole-field` (read stage) | Stray-field map, field section, read-back waveform |
 | `output:applied-field-strength` | Not needed: the head field is rebuilt from the input, exactly as VAMPIRE applies it |
 
+## Runs it adapts to
+
+Nothing is tied to one run. The reducer reads everything from the run's own files:
+- tracks, bits per track and the bit sequence follow VAMPIRE's rules (`hamr:number-of-bits`, `track-size`,
+  `track-padding`, single-tone or user-defined sequences, field-free `0` bits);
+- the head field follows `sim:min/maximum-applied-field-strength`, rise/fall times and the field direction;
+- `grain.txt` columns follow the input's `grain:` keywords in order (`time-steps` or `real-time` etc.);
+- snapshots in binary or text, single file or one file per node or process; truncated copies are skipped with a
+  warning;
+- the grids adapt to the lattice and size: atom columns at the atomic pitch up to 4M pixels, then coarser; layers
+  at 2 x 2 sites (`--layer-factor 1` stores every atom) up to 2.5M cells per snapshot, then coarser;
+- grain shapes come from the atoms' grain IDs; coordinate files without grain IDs (older VAMPIRE text format)
+  fall back to the Voronoi outlines, labelled approximate.
+
+Tested on the large run cluster chain (1 track, 33 bits, binary file-per-node, 8.7M atoms) and the 2026-10-15 two-track
+run (2 tracks x 11 bits with field-free edge bits, text snapshots, film cut by a geometry file, 1.6M atoms).
+
 ## How much is kept
 
 Everything VAMPIRE writes per grain (`grain.txt`, every frame) and per run (`output`) is kept at full time resolution.
@@ -73,13 +90,16 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
 - **Stages**: relax, write and read-back, as a chain at the top right. The address ends in `#write` etc., so a
   stage can be bookmarked.
 - **Lanes** share the film's x axis; hovering any lane draws one crosshair through all of them.
-  - *Bits*: intended bits, shifted upstream by the freeze lag, with the fraction of melted grains written as
-    intended under each.
+  - *Bits*: intended bits of the track under the section line, shifted upstream by the freeze lag, with the
+    melted grains pointing along their bit's field at the current time (green) under each.
   - *Film*: grains (shapes from the atoms), atom columns (through-thickness average) or one atomic layer; coloured
     by m_z, m_z against the intended bit (never-melted grains grey), peak laser temperature or the lowest |m|
     reached. Laser isotherms (bold: freezing temperature) and the head-field box with its direction and strength.
-    The dashed line is the section line: click the film to move it.
-  - *Transport* directly under the film: play/pause (space), 0.1x to 30x, step (arrow keys, shift for 50 frames).
+    The dashed line is the section line: click the film to move it. *Bit cells* overlays every bit's region on
+    every track and the band hotter than the freezing temperature (the part of the track that can be written).
+    Atom views show the nearest snapshot; its time is printed on the image when it differs from the timeline.
+  - *Transport* directly under the film: start / play / end (Home, space, End), 0.1x to 30x, step (arrow keys,
+    shift for 50 frames).
   - *x–z section*: slice through the section line from the nearest snapshot (height x2).
   - Read stage: *stray field* B_z at a chosen sensor height, *field section* (x–z), *read-back* waveform (mean B_z
     across a reader band of chosen width) with the intended transitions.

@@ -38,6 +38,41 @@ class FieldModel(unittest.TestCase):
             self.assertEqual(vp.Hamr(d).Hpeak, 2.0)
 
 
+class TrackRules(unittest.TestCase):
+    """Tracks, bits and sequence as src/hamr/initialize.cpp and bit_sequence.cpp decide them."""
+
+    def hamr(self, **keys):
+        text = open(os.path.join(RUN, "input")).read()
+        for k, v in keys.items():
+            text = re.sub(rf"hamr:{k}\s*=.*\n", "", text) + (f"hamr:{k} = {v}\n" if v is not None else "")
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "input"), "w").write(text)
+            return vp.Hamr(d)
+
+    def test_tracks_fit_the_film(self):
+        # 12 x 6 nm film, 3 nm bits: 3 bits per track; 2.5 nm tracks fit twice, so 6 bits give 2 tracks
+        h = self.hamr(**{"track-size": "2.5 !nm", "number-of-bits": 6})
+        self.assertEqual((h.n_tracks, h.bits_per_track, len(h.sequence)), (2, 3, 6))
+        # 9 bits still only fit 2 tracks: the sequence is cut to 6
+        h = self.hamr(**{"track-size": "2.5 !nm", "number-of-bits": 9})
+        self.assertEqual((h.n_tracks, len(h.sequence)), (2, 6))
+
+    def test_user_sequence_padded_with_zero_bits(self):
+        h = self.hamr(**{"bit-sequence-type": "user-defined", "bit-sequence": "1,1", "number-of-bits": 3})
+        self.assertEqual(h.sequence, [1, 1, 0])
+        self.assertEqual(h.field(np.array([h.eq + h.ne + 2 * h.nb + 5]))[0], 0.0)   # field off in a 0 bit
+
+    def test_grain_columns_follow_the_input(self):
+        with tempfile.TemporaryDirectory() as d:
+            for f in ("grain.txt", "m.mat"):
+                shutil.copy(os.path.join(RUN, f), d)
+            text = open(os.path.join(RUN, "input")).read().replace("grain:real-time", "grain:time-steps")
+            open(os.path.join(d, "input"), "w").write(text)
+            cols, m = vp.read_grain_file(d, 9)
+            self.assertEqual(list(cols), ["step"])
+            self.assertEqual(m.shape[1:], (9, 4))
+
+
 class Reduce(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

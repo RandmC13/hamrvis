@@ -12,7 +12,7 @@
 </head>
 <body>
 <header class="top">
-  <div class="run"><h1 id="run-name">HAMR run</h1><p id="run-sub">Loading bundle…</p></div>
+  <div class="run"><h1><span id="run-name">HAMR run</span><button class="icon" id="theme" aria-label="Switch light or dark theme" title="Light / dark">◐</button></h1><p id="run-sub">Loading bundle…</p></div>
   <nav class="chain" id="chain" aria-label="Simulation stage"></nav>
 </header>
 
@@ -31,9 +31,9 @@
   </div>
   <label class="ctl" id="z-ctl" hidden>Sensor z <input id="zsel" type="range" min="0" max="0" value="0"><output id="z-out"></output></label>
   <label class="ctl" id="w-ctl" hidden>Reader width <input id="rw" type="range" min="1" max="40" value="10"><output id="w-out"></output></label>
+  <label class="ctl" id="cells-ctl"><input type="checkbox" id="cells"> Bit cells</label>
   <span class="spacer"></span>
   <button class="tool" id="save-png">Save PNG</button>
-  <button class="tool" id="theme" aria-label="Switch light or dark theme">Theme</button>
 </div>
 
 <main class="work">
@@ -42,7 +42,9 @@
     <div class="axis"><span>x (nm)</span><canvas id="axis-top" aria-hidden="true"></canvas></div>
     <div class="transport" id="transport">
       <div class="play">
+        <button class="step" id="to-start" aria-label="Go to start" title="Start">⏮</button>
         <button id="play" aria-label="Play">▶</button>
+        <button class="step" id="to-end" aria-label="Go to end" title="End">⏭</button>
         <select id="speed" aria-label="Playback speed, frames per tick">
           <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1">1×</option>
           <option value="3" selected>3×</option><option value="10">10×</option><option value="30">30×</option>

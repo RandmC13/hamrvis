@@ -11,6 +11,8 @@ def main():
     r.add_argument("runs", nargs="+", help="run directories, or a folder whose subfolders are run directories")
     r.add_argument("-o", "--out", required=True, help="bundle directory to write")
     r.add_argument("--no-volume", action="store_true", help="skip the per-layer volume (saves ~90%% of the size)")
+    r.add_argument("--layer-factor", type=int, help="per-layer cell size in atomic sites (1 = every atom; default 2, "
+                                                     "more for large systems)")
     r.add_argument("--every", type=int, default=1, help="keep every n-th spin snapshot (the last one is always kept)")
     r.add_argument("--tc", type=float, help="Curie temperature (K) for the analysis; default: measured from the data")
     r.add_argument("--name", help="run name shown in the viewer (default: the runs' common folder name)")
@@ -29,7 +31,8 @@ def main():
     x.add_argument("--artifact", action="store_true", help="omit the document skeleton (for localhost.ai artifacts)")
     a = ap.parse_args()
     if a.cmd == "reduce":
-        red.reduce(a.runs, a.out, volume=not a.no_volume, every=a.every, Tc=a.tc, workers=a.workers, name=a.name)
+        red.reduce(a.runs, a.out, volume=not a.no_volume, every=a.every, Tc=a.tc, workers=a.workers, name=a.name,
+                   layer_factor=a.layer_factor)
     elif a.cmd == "export":
         from . import export
         export.export(a.bundle, a.out, a.grain_step, a.snap_step, not a.no_volume, a.limit_mb, a.artifact)

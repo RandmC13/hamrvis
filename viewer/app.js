@@ -26,7 +26,7 @@ async function tryBuf(path) { try { return await getBuf(path); } catch (e) { ret
 
 // ------------------------------------------------------------------------------------------------ state
 const S = { M: null, stage: null, f: 0, fa: 0, view: "grains", colour: "mz", layer: 0, sel: -1, hov: -1, ysec: 0,
-            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, hx: null };
+            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, hx: null };
 const D = {};                                                    // per-stage data, filled by loadStage
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -169,6 +169,9 @@ function minGrainM(d, g) {
   }
   return _minGrain[d.st][g];
 }
+// written as intended at frame f: melted at some point in the run, and pointing along its bit's field now
+const okAt = (d, f, a, g) => a.intended !== 0 && Math.sign(gmz(d, f, g)) === a.intended;
+const melted = a => a.category !== "unheated" && a.intended !== 0;
 const wantOf = (d, g) => {                                        // intended z direction of grain g (write analysis);
   const an = d.an || (D.write && D.write.an);                     // 0 for grains the laser never melts
   return an && an[g] && an[g].category !== "unheated" ? an[g].intended : 0;
@@ -276,9 +279,37 @@ function drawFilm(ctx, w, h) {
   ctx.setLineDash([5, 4]); ctx.lineWidth = 1; ctx.strokeStyle = css("--ink"); ctx.globalAlpha = .5;
   const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(w, yl); ctx.stroke();
   ctx.setLineDash([]); ctx.globalAlpha = 1;
+  if (S.cells) note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
   if (d.model) drawHead(ctx, d, sx, sy, h);
   if (S.stage === "read") drawReaderBand(ctx, w, h, sy);
+  if (view !== "grains") {   // atom views show the nearest snapshot: say so on the image when it is not this time
+    const s = nearestSnap(d, d.steps[S.f]);
+    if (s && Math.abs(s.step - d.steps[S.f]) * e.dt > 1e-13) {
+      const txt = `snapshot ${timeText(d, s.time)}`;
+      ctx.font = `600 12px ${css("--font")}`; const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = css("--ink"); ctx.globalAlpha = .8; ctx.fillRect(6, h - 26, tw + 12, 20); ctx.globalAlpha = 1;
+      ctx.fillStyle = css("--lane"); ctx.textAlign = "left"; ctx.fillText(txt, 12, h - 12);
+    }
+  }
   setNote("map", [note, `section y ${fmt(S.ysec)} nm`]);
+}
+// bit cells (each bit's region, shifted upstream by the freeze lag) and the band hotter than Tc, on every track
+function drawCells(ctx, sx, sy, h) {
+  const W = S.M.stages.write; if (!W || !W.hamr) return "";
+  const p = W.hamr, lag = W.freeze_lag_nm || 0, Tc = W.Tc;
+  const half = Tc > p.Tmin && Tc < p.Tmax ? p.sigma_y * Math.sqrt(2 * Math.log((p.Tmax - p.Tmin) / (Tc - p.Tmin))) : 0;
+  ctx.font = `600 10.5px ${css("--font")}`; ctx.textAlign = "center";
+  for (let t = 0; t < p.n_tracks; t++) {
+    const y0 = p.pad + t * p.TW, y1 = y0 + p.TW, yc = y0 + p.TW / 2;
+    ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1; ctx.globalAlpha = .7; ctx.setLineDash([3, 3]);
+    for (let b = 0; b <= p.bits_per_track; b++) { const x = (b * p.BL - lag) * sx; ctx.beginPath(); ctx.moveTo(x, h - y1 * sy); ctx.lineTo(x, h - y0 * sy); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.strokeRect(-lag * sx, h - y1 * sy, p.bits_per_track * p.BL * sx, p.TW * sy);
+    if (half) { ctx.lineWidth = 1.6; ctx.globalAlpha = .9;
+      for (const yy of [yc - half, yc + half]) { ctx.beginPath(); ctx.moveTo(-lag * sx, h - yy * sy); ctx.lineTo((p.bits_per_track * p.BL - lag) * sx, h - yy * sy); ctx.stroke(); } }
+    ctx.globalAlpha = 1; ctx.fillStyle = css("--ink");
+    for (let b = 0; b < p.bits_per_track; b++) if (p.BL * sx > 14) ctx.fillText(b + 1, ((b + .5) * p.BL - lag) * sx, h - y1 * sy + 12);
+  }
+  return `bit cells shifted ${fmt(lag)} nm upstream; solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm`;
 }
 function drawHead(ctx, d, sx, sy, h) {
   const m = d.model, p = m.p, step = d.steps[S.f], hd = m.head(step);
@@ -325,9 +356,10 @@ function pixelImage(d, view) {
     return pixImage(G.nx, G.ny, i => col(a[2 * G.nx * G.ny + i], i));
   }
   const a = snapArray(d, "vol", s.index); if (!a) return null;
-  const n = G.vx * G.vy, o = 2 * G.nz * n + S.layer * n;
-  return pixImage(G.vx, G.vy, i => col(a[o + i], ((Math.floor(i / G.vx) * 2) * G.nx + (i % G.vx) * 2)));
+  const n = G.vx * G.vy, o = 2 * G.nz * n + S.layer * n, r = lp(G) / G.pitch_nm;
+  return pixImage(G.vx, G.vy, i => col(a[o + i], Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))));
 }
+const lp = G => G.layer_pitch_nm || 2 * G.pitch_nm;
 function snapLabel(d, s) {
   const dt = Math.abs(s.step - d.steps[S.f]) * d.e.dt;
   return `snapshot ${timeText(d, s.time)}` + (dt > 1e-13 ? ` (Δ ${fmt(dt * 1e12, 0)} ps)` : "");
@@ -368,7 +400,7 @@ function xzLane() {
       ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
       const s = nearestSnap(d, d.steps[S.f]), a = s ? snapArray(d, "vol", s.index) : null;
       if (!a) { setNote("xz", [s ? "loading" : "no snapshot"]); return; }
-      const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / (2 * G.pitch_nm))));
+      const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / lp(G))));
       blit(ctx, pixImage(G.vx, G.nz, i => { const v = a[2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx)];
         return v === -128 ? LUT.void : rgbOf(LUT.m, idxDiv(v / 127)); }), w, h);
       setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×2`, snapLabel(d, s)]);
@@ -390,27 +422,30 @@ function bitsLane() {
       ctx.font = `600 11.5px ${css("--font")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       for (let b = 0; b < p.bits_per_track; b++) {
         const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), x0 = X(b * p.BL - lag, w), x1 = X((b + 1) * p.BL - lag, w);
-        ctx.fillStyle = rgb(LUT.m, idxDiv(want * .45)); ctx.fillRect(x0 + .5, 2, x1 - x0 - 1, 18);
-        const gs = d.an.filter(a => a.track === t && a.bit === b && a.category !== "unheated"), ok = gs.filter(a => a.correct).length;
+        ctx.fillStyle = want ? rgb(LUT.m, idxDiv(want * .45)) : css("--rule"); ctx.fillRect(x0 + .5, 2, x1 - x0 - 1, 18);
+        const gs = [], f = S.f;
+        d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); });
+        const ok = gs.filter(g => okAt(d, f, d.an[g], g)).length;
         if (gs.length) {
           const fw = (x1 - x0 - 1) * ok / gs.length;
           ctx.fillStyle = css("--ok"); ctx.fillRect(x0 + .5, 24, fw, 4);
           ctx.fillStyle = css("--bad"); ctx.fillRect(x0 + .5 + fw, 24, x1 - x0 - 1 - fw, 4);
           if (x1 - x0 > 26) { ctx.fillStyle = css("--muted"); ctx.fillText(`${ok}/${gs.length}`, (x0 + x1) / 2, 35); }
         }
-        ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : "↓", (x0 + x1) / 2, 11);
+        ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : want < 0 ? "↓" : "0", (x0 + x1) / 2, 11);
       }
       const bt = d.model.bit(d.steps[S.f]);
       if (bt && bt[0] === t) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.strokeRect(X(bt[1] * p.BL - lag, w) + 1, 1, X(p.BL, w) - 2, 20); }
-      setNote("bits", []);
+      setNote("bits", [p.n_tracks > 1 ? `track ${t + 1} of ${p.n_tracks} (follows the section line)` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`]);
     },
     hover(x) {
       const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = trackOfSection(p), b = Math.floor((x + lag) / p.BL);
       if (b < 0 || b >= p.bits_per_track) return "";
       const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz);
-      const gs = d.an.filter(a => a.track === t && a.bit === b && a.category !== "unheated");
-      return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], ["intended", want > 0 ? "up (+z)" : "down (−z)"],
-        ["x", `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], ["melted grains ✓", `${gs.filter(a => a.correct).length} / ${gs.length}`]]);
+      const gs = []; d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); });
+      return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], ["intended", want > 0 ? "up (+z)" : want < 0 ? "down (−z)" : "no field"],
+        ["x", `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], [`✓ at ${timeText(d, d.time[S.f])}`, `${gs.filter(g => okAt(d, S.f, d.an[g], g)).length} / ${gs.length}`],
+        ["✓ at end", `${gs.filter(g => d.an[g].correct).length} / ${gs.length}`]]);
     },
   };
 }
@@ -624,7 +659,7 @@ function drawSt() {
   sec.hidden = !(d.g && d.nF > 1 && S.stage === "write");
   if (sec.hidden) return;
   const c = $("st"), rows = stRows(d), left = 44, top = 16, bot = 20;
-  const rowH = Math.max(1.5, Math.min(8, 460 / rows.length)), H = top + bot + rowH * rows.length;
+  const rowH = Math.min(8, 520 / rows.length), H = top + bot + rowH * rows.length;
   const { ctx, w, h } = fit(c, H), pw = w - left - 4;
   const key = `${S.stage}|${S.stAll}|${S.colour}|${rows.length}|${document.documentElement.dataset.theme || ""}`;
   if (!_st || _st.key !== key) {
@@ -640,7 +675,7 @@ function drawSt() {
     const p = d.model.p;
     for (let t = 0; t < p.n_tracks; t++) for (let b = 0; b < p.bits_per_track; b++) {   // bit windows along the top
       const s0 = p.eq + t * p.nt + p.ne + b * p.nb, want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz);
-      ctx.fillStyle = css(want > 0 ? "--up" : "--down"); ctx.fillRect(tx(s0) + .5, 4, tx(s0 + p.nb) - tx(s0) - 1, 6);
+      ctx.fillStyle = css(want > 0 ? "--up" : want < 0 ? "--down" : "--rule"); ctx.fillRect(tx(s0) + .5, 4, tx(s0 + p.nb) - tx(s0) - 1, 6);
     }
     ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.1; ctx.setLineDash([4, 3]); ctx.beginPath();   // laser over each grain
     rows.forEach((g, r) => { const s = d.model.passStep(d.e.grains.x[g], d.an ? d.an[g].track : 0); r ? ctx.lineTo(tx(s), ry(r)) : ctx.moveTo(tx(s), ry(r)); });
@@ -650,13 +685,19 @@ function drawSt() {
       rows.forEach((g, r) => { const a = d.an[g]; if (a.decision_step != null) ctx.fillRect(tx(a.decision_step) - 1, ry(r) - rowH / 2, 2, Math.max(rowH, 1.5)); });
     }
   }
+  if (d.an && d.model && d.model.p.n_tracks > 1) {   // track separators and names
+    ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.5; ctx.fillStyle = css("--ink"); ctx.font = `600 10.5px ${css("--font")}`; ctx.textAlign = "left";
+    rows.forEach((g, r) => { if (r && d.an[g].track !== d.an[rows[r - 1]].track) { ctx.beginPath(); ctx.moveTo(left - 40, top + r * rowH); ctx.lineTo(left + pw, top + r * rowH); ctx.stroke(); } });
+    for (let t = 0; t < d.model.p.n_tracks; t++) { const r = rows.findIndex(g => d.an[g].track === t); if (r >= 0) ctx.fillText(`track ${t + 1}`, left + 4, top + r * rowH + 11); }
+  }
   ctx.fillStyle = css("--muted"); ctx.font = `500 10.5px ${css("--font")}`; ctx.textAlign = "right";
   const every = Math.ceil(14 / rowH);
   rows.forEach((g, r) => { if (r % every === 0) ctx.fillText(fmt(d.e.grains.x[g], 0), left - 5, ry(r) + 3.5); });
   const rs = rows.indexOf(S.sel);
   if (rs >= 0) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.5; ctx.strokeRect(left - .5, ry(rs) - rowH / 2 - 1, pw + 1, rowH + 2); }
   ctx.textAlign = "center";
-  const tEnd = d.time[d.nF - 1], dtick = tEnd > 2e-9 ? 0.5e-9 : tEnd > 4e-10 ? 1e-10 : 2e-11;
+  const tEnd = d.time[d.nF - 1], nice = [1, 2, 5].flatMap(m => [1e-13, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7].map(e => m * e)).sort((a, b) => a - b);
+  const dtick = nice.find(v => v / tEnd * pw >= 80) || tEnd;          // labels at least 80 px apart
   for (let t = 0; t <= tEnd + 1e-15; t += dtick) ctx.fillText(timeText(d, t), Math.min(w - 20, tx(Math.round(t / d.e.dt))), h - 5);
   const xc = tx(d.steps[S.f]); ctx.fillStyle = css("--ink"); ctx.fillRect(xc - .75, top - 3, 1.5, rowH * rows.length + 6);
   c._map = { rows, left, top, rowH, pw, t0, t1 };
@@ -696,8 +737,10 @@ const stageTitle = st => ({ relax: "Relaxation", write: "Write", read: "Read-bac
 function stageFacts(st) {
   const d = D[st], e = d.e;
   if (st === "write" && e.analysis) {
-    const an = e.analysis.grains, heated = an.filter(a => a.intended && a.category !== "unheated"), ok = heated.filter(a => a.correct).length;
-    return [["melted grains ✓", `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`], ["freezing T (measured)", `${fmt(e.Tc, 0)} K`],
+    const an = e.analysis.grains, heated = an.filter(melted), ok = heated.filter(a => a.correct).length;
+    let now = 0; an.forEach((a, g) => { if (melted(a) && okAt(d, S.f, a, g)) now++; });
+    return [[`✓ at ${timeText(d, d.time[S.f])}`, `${now} / ${heated.length} (${fmt(100 * now / heated.length, 0)} %)`],
+      ["✓ at end", `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`], ["freezing T (measured)", `${fmt(e.Tc, 0)} K`],
       ["freeze lag", `${fmt(e.freeze_lag_nm)} nm`], ["peak head field", `${fmt(e.hamr.Hpeak, 2)} T`], ["head speed", `${fmt(e.hamr.v, 0)} m/s`],
       ["bits", e.hamr.bits_per_track * e.hamr.n_tracks], ["bit length", `${fmt(e.hamr.BL)} nm`], ["laser T", `${fmt(e.hamr.Tmin, 0)}–${fmt(e.hamr.Tmax, 0)} K`]];
   }
@@ -840,6 +883,7 @@ function syncControls() {
   $("z-ctl").hidden = $("w-ctl").hidden = S.stage !== "read" || !d.e.dipole;
   if (d.e.dipole) { $("zsel").max = d.e.dipole.nz - 2; $("zsel").value = S.z; $("z-out").textContent = zText(S.z); $("w-out").textContent = `${S.rw} nm`; }
   $("st-all").checked = S.stAll;
+  $("cells-ctl").hidden = !(S.M.stages.write && S.M.stages.write.hamr);
 }
 function bindControls() {
   [["v-grains", "grains"], ["v-atoms", "atoms"], ["v-layer", "layer"]].forEach(([id, v]) => $(id).onclick = () => { S.view = v; syncControls(); redraw(); });
@@ -849,7 +893,10 @@ function bindControls() {
   $("rw").oninput = ev => { S.rw = +ev.target.value; syncControls(); redraw(); };
   $("st-all").onchange = ev => { S.stAll = ev.target.checked; redraw(); };
   $("play").onclick = togglePlay;
-  $("theme").onclick = () => {
+  $("to-start").onclick = () => seek(0);
+  $("to-end").onclick = () => seek(cur().nF - 1);
+  $("cells").onchange = ev => { S.cells = ev.target.checked; redraw(); };
+  $("theme").onclick = () => {   // header button; the artifact host may also set data-theme
     const root = document.documentElement, dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     root.dataset.theme = dark ? "light" : "dark";
     try { localStorage.setItem("hamrvis-theme", root.dataset.theme); } catch (e) { /* storage unavailable */ }
@@ -871,6 +918,8 @@ function bindControls() {
     if (ev.key === " ") { ev.preventDefault(); togglePlay(); }
     else if (ev.key === "ArrowRight") { ev.preventDefault(); seek(S.f + n); }
     else if (ev.key === "ArrowLeft") { ev.preventDefault(); seek(S.f - n); }
+    else if (ev.key === "Home") { ev.preventDefault(); seek(0); }
+    else if (ev.key === "End") { ev.preventDefault(); seek(cur().nF - 1); }
     else if (ev.key === "Escape") { S.sel = -1; redraw(); }
   });
   $("save-png").hidden = !!EMB;
