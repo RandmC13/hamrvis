@@ -391,13 +391,21 @@ def share_grain_map(out, manifest):
 
 # ------------------------------------------------------------------------------------------------ driver
 def find_runs(paths):
-    """Run directories (folders with an 'input' file) among paths and their immediate subfolders."""
+    """Run directories among paths and their immediate subfolders. A path given directly must hold an 'input'; in a
+    scanned folder only subfolders with both 'input' and 'output' (a run that ran) count, so copies of inputs or
+    source trees next to the runs are skipped."""
     runs = []
     for p in paths:
         if os.path.exists(os.path.join(p, "input")):
             runs.append(p)
-        else:
-            runs += sorted(os.path.join(p, d) for d in os.listdir(p) if os.path.exists(os.path.join(p, d, "input")))
+            continue
+        for d in sorted(os.listdir(p)):
+            q = os.path.join(p, d)
+            if os.path.exists(os.path.join(q, "input")):
+                if os.path.exists(os.path.join(q, "output")):
+                    runs.append(q)
+                else:
+                    log(f"skipping {q}: it has an input file but no output (not a run)")
     return runs
 
 
@@ -412,8 +420,8 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
     for run in runs:
         stage = vp.stage_of(run)
         if stage in manifest["stages"]:
-            raise SystemExit(f"two {stage} runs ({manifest['stages'][stage]['source']} and {run}): reduce them "
-                             f"into separate bundles")
+            raise SystemExit(f"two {stage} runs ({manifest['stages'][stage]['source']} and {run}): pass the run "
+                             f"directories you want explicitly, or reduce them into separate bundles")
         log(f"{stage}: {run}")
         sd = os.path.join(out, stage)
         os.makedirs(sd, exist_ok=True)

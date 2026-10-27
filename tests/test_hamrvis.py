@@ -147,6 +147,13 @@ class Reduce(unittest.TestCase):
             if g["category"] in ("full-field", "reversal", "zero-field"):
                 self.assertIn("decision_step", g)
 
+    def test_folder_scan_skips_non_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.symlink(RUN, os.path.join(d, "write"))
+            os.makedirs(os.path.join(d, "src"))
+            shutil.copy(os.path.join(RUN, "input"), os.path.join(d, "src"))     # an input copy that never ran
+            self.assertEqual([os.path.basename(r) for r in reduce.find_runs([d])], ["write"])
+
     def test_export(self):
         out = os.path.join(self.tmp, "page.html")
         export.export(self.bundle, out, grain_step=2)
