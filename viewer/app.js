@@ -250,6 +250,7 @@ function filmLane(title) {
   };
 }
 
+let _lastPix = null;
 function drawFilm(ctx, w, h) {
   const d = cur(), e = d.e, sx = w / e.size_nm[0], sy = h / e.size_nm[1], M = e.grain_map;
   ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
@@ -265,7 +266,10 @@ function drawFilm(ctx, w, h) {
       note = "approximate Voronoi outlines (no atom coordinates)";
     }
   } else {
-    const img = pixelImage(d, view);
+    let img = pixelImage(d, view);
+    const key = `${d.st}|${view}|${S.colour}|${S.layer}`;
+    if (img) _lastPix = { img, key };
+    else if (_lastPix && _lastPix.key === key) img = _lastPix.img;   // next snapshot still loading: no blank frame
     if (img) blit(ctx, img, w, h);
     const s = nearestSnap(d, d.steps[S.f]);
     if (s) note = snapLabel(d, s);
@@ -447,10 +451,16 @@ function xzLane() {
       const d = cur(), G = d.grid;
       ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
       const s = nearestSnap(d, d.steps[S.f]), a = s ? snapArray(d, "vol", s.index) : null;
-      if (!a) { setNote("xz", [s ? "loading" : "no snapshot"]); return; }
+      if (!a) {   // still loading: keep showing the last section drawn instead of a blank frame
+        if (this._last && this._last.st === d.st) { blit(ctx, this._last.img, w, h); setNote("xz", [`y ${fmt(S.ysec)} nm`, snapLabel(d, this._last.s), "loading next snapshot"]); }
+        else setNote("xz", [s ? "loading" : "no snapshot"]);
+        return;
+      }
       const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / lp(G))));
-      blit(ctx, pixImage(G.vx, G.nz, i => { const v = a[2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx)];
-        return v === -128 ? LUT.void : rgbOf(LUT.m, idxDiv(v / 127)); }), w, h);
+      const img = pixImage(G.vx, G.nz, i => { const v = a[2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx)];
+        return v === -128 ? LUT.void : rgbOf(LUT.m, idxDiv(v / 127)); });
+      blit(ctx, img, w, h);
+      this._last = { img, s, st: d.st };
       setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×2`, snapLabel(d, s)]);
     },
     hover(x, y, ev, h) { return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((1 - y / h) * cur().grid.nz * cur().grid.pitch_z_nm)} nm`]]); },
@@ -998,10 +1008,14 @@ function tick(ts) {
   }
   requestAnimationFrame(tick);
 }
+// load the next snapshots the visible views will need before playback reaches them
 function prefetch(d) {
-  if (!d.snaps || S.view === "grains") return;
-  const s = nearestSnap(d, d.steps[Math.min(d.nF - 1, S.f + 60)]);
-  if (s) snapArray(d, S.view === "atoms" ? "top" : "vol", s.index);
+  if (!d.snaps) return;
+  const kinds = [];
+  if (S.view === "atoms") kinds.push("top");
+  if (S.view === "layer" || (d.e.snapshots.volume && LANES.some(L => L.id === "xz"))) kinds.push("vol");
+  const step = d.steps[S.f];
+  for (const s of d.snaps.filter(s => s.step > step).slice(0, 2)) for (const k of kinds) snapArray(d, k, s.index);
 }
 function savePng() {
   const r = dpr(), cs = LANES.map(L => L.canvas).concat([$("axis-top")]), head = 40 * r;
