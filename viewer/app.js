@@ -246,10 +246,12 @@ function filmLane(title) {
     height: w => Math.round(w * Ly() / Lx()),
     draw: drawFilm,
     hover: filmTip,
-    click(x, y) { S.sel = grainAt(x, y); S.ysec = y; redraw(); },
+    click(x, y) { const g = grainAt(x, y); S.sel = g === S.sel ? -1 : g; S.ysec = y; redraw(); },   // clicking the selected grain deselects it
+    drag: dragSection,
   };
 }
 
+const dragSection = (x, y) => { S.ysec = Math.min(Ly(), Math.max(0, y)); };   // section line follows a held mouse button
 let _lastPix = null;
 function drawFilm(ctx, w, h) {
   const d = cur(), e = d.e, sx = w / e.size_nm[0], sy = h / e.size_nm[1], M = e.grain_map;
@@ -279,6 +281,11 @@ function drawFilm(ctx, w, h) {
     if (g < 0) continue;
     ctx.fillStyle = css(col); const pw = w / M.nx * (lw + .2), ph = h / M.ny * (lw + .2);
     for (const i of grainEdge(d, g)) ctx.fillRect((i % M.nx) * w / M.nx, h - (Math.floor(i / M.nx) + 1) * h / M.ny, pw, ph);
+  }
+  else if (e.grains.outline) for (const [g, col, lw] of [[S.hov, "--muted", 1.2], [S.sel, "--ink", 2]]) {   // Voronoi fallback
+    const o = g >= 0 && e.grains.outline[g]; if (!o) continue;
+    ctx.beginPath(); o.forEach(([x, y], i) => i ? ctx.lineTo(x * sx, h - y * sy) : ctx.moveTo(x * sx, h - y * sy)); ctx.closePath();
+    haloStroke(ctx, css(col), lw);
   }
   ctx.setLineDash([5, 4]); ctx.lineWidth = 1; ctx.strokeStyle = css("--ink"); ctx.globalAlpha = .5;
   const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(w, yl); ctx.stroke();
@@ -358,24 +365,36 @@ function drawCells(ctx, sx, sy, h) {
   return `bit cells shifted ${fmt(lag)} nm upstream; solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm` +
     (S.pol ? "; outline: sign of the cell's mean m_z inside the band (grey: |m_z| < 0.05)" : "");
 }
+// laser isotherms drawn on the film and keyed in the legend: freezing T solid, then dashed, dash-dot, dotted with falling T
+function isotherms(d) {
+  const p = d.model.p, Tc = d.e.Tc, dashes = [[10, 4], [6, 3, 1.5, 3], [1.5, 3]];
+  const others = [600, 500, 400].filter(T => T > p.Tmin && T < p.Tmax && Math.abs(T - Tc) > 15);
+  return [...(Tc > p.Tmin && Tc < p.Tmax ? [{ T: Tc, w: 2.4, dash: [] }] : []), ...others.map((T, i) => ({ T, w: 1.4, dash: dashes[i] }))];
+}
+// a line over the grain imagery: a wider stroke in the lane colour underneath keeps it readable on red and blue
+function haloStroke(ctx, colour, w) {
+  ctx.strokeStyle = css("--lane"); ctx.lineWidth = w + 3; ctx.globalAlpha = .85; ctx.stroke();
+  ctx.strokeStyle = colour; ctx.lineWidth = w; ctx.globalAlpha = 1; ctx.stroke();
+}
 function drawHead(ctx, d, sx, sy, h) {
   const m = d.model, p = m.p, step = d.steps[S.f], hd = m.head(step);
   if (!hd.on) return;
-  const px = x => x * sx, py = y => h - y * sy, Tc = d.e.Tc;
-  ctx.strokeStyle = css("--ink");
-  for (const T of [400, 500, 600, Tc].filter(T => T > p.Tmin && T < p.Tmax)) {
+  const px = x => x * sx, py = y => h - y * sy, ink = css("--ink");
+  for (const { T, w, dash } of isotherms(d)) {
     const r = Math.sqrt(2 * Math.log((p.Tmax - p.Tmin) / (T - p.Tmin)));
-    ctx.lineWidth = T === Tc ? 2.2 : 1; ctx.globalAlpha = T === Tc ? .95 : .45;
-    ctx.beginPath(); ctx.ellipse(px(hd.x), py(hd.y), r * p.sigma_x * sx, r * p.sigma_y * sy, 0, 0, 2 * Math.PI); ctx.stroke();
+    ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.ellipse(px(hd.x), py(hd.y), r * p.sigma_x * sx, r * p.sigma_y * sy, 0, 0, 2 * Math.PI); haloStroke(ctx, ink, w);
   }
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = css("--ink"); ctx.beginPath(); ctx.arc(px(hd.x), py(hd.y), 3, 0, 2 * Math.PI); ctx.fill();
-  const B = m.field(step) * p.field_uz, bx = hd.x - p.NPS;
-  ctx.strokeStyle = css(B > 0 ? "--up" : B < 0 ? "--down" : "--muted"); ctx.lineWidth = 2.2; ctx.setLineDash(B === 0 ? [3, 3] : []);
-  ctx.strokeRect(px(bx - p.box_x / 2), py(hd.y + p.box_y / 2), p.box_x * sx, p.box_y * sy);
   ctx.setLineDash([]);
-  ctx.fillStyle = ctx.strokeStyle; ctx.font = `600 12px ${css("--font")}`; ctx.textAlign = "center";
-  ctx.fillText(B === 0 ? "0 T" : `${B > 0 ? "↑" : "↓"} ${Math.abs(B).toFixed(2)} T`, px(bx), py(hd.y + p.box_y / 2) - 5);
+  ctx.beginPath(); ctx.arc(px(hd.x), py(hd.y), 3, 0, 2 * Math.PI); haloStroke(ctx, ink, 1); ctx.fillStyle = ink; ctx.fill();
+  const B = m.field(step) * p.field_uz, bx = hd.x - p.NPS, colour = css(B > 0 ? "--up" : B < 0 ? "--down" : "--muted");
+  ctx.setLineDash(B === 0 ? [3, 3] : []);
+  ctx.beginPath(); ctx.rect(px(bx - p.box_x / 2), py(hd.y + p.box_y / 2), p.box_x * sx, p.box_y * sy); haloStroke(ctx, colour, 2.4);
+  ctx.setLineDash([]);
+  const label = B === 0 ? "0 T" : `${B > 0 ? "↑" : "↓"} ${Math.abs(B).toFixed(2)} T`, ly = py(hd.y + p.box_y / 2) - 6;
+  ctx.font = `600 12px ${css("--font")}`; ctx.textAlign = "center"; ctx.lineJoin = "round";
+  ctx.strokeStyle = css("--lane"); ctx.lineWidth = 4; ctx.strokeText(label, px(bx), ly);
+  ctx.fillStyle = colour; ctx.fillText(label, px(bx), ly); ctx.lineJoin = "miter";
 }
 function drawReaderBand(ctx, w, h, sy) {
   ctx.fillStyle = css("--ink"); ctx.globalAlpha = .1;
@@ -470,39 +489,52 @@ function xzLane() {
 
 // ---- bits lane: intended bits shifted back by the freeze lag, with the per-bit outcome
 const trackOfSection = p => Math.min(p.n_tracks - 1, Math.max(0, Math.floor((S.ysec - p.pad) / p.TW)));
+// one row per track, stacked as on the film (last track on top)
 function bitsLane() {
+  const head = p => p.n_tracks > 1 ? 13 : 0, row = p => 40 + head(p);   // multi-track rows get a label line
+  const rowTrack = (p, py) => Math.min(p.n_tracks - 1, Math.max(0, p.n_tracks - 1 - Math.floor(py / row(p))));
+  const bitGrains = (d, t, b) => { const gs = []; d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); }); return gs; };
+  // written once one of its grains has frozen: before that a grain "agrees" only because of the starting state
+  const written = (d, f, gs) => f === d.nF - 1 || gs.some(g => d.an[g].decision_step != null && d.an[g].decision_step <= d.steps[f]);
   return {
-    id: "bits", group: "top", title: "Bits",
-    height: () => 40,
+    id: "bits", group: "top", title: "Bits", yMode: "px",
+    height: () => row(cur().model.p) * cur().model.p.n_tracks,
     draw(ctx, w, h) {
-      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = trackOfSection(p);
+      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, bt = d.model.bit(d.steps[S.f]), f = S.f;
       ctx.clearRect(0, 0, w, h);
       ctx.font = `600 11.5px ${css("--font")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      for (let b = 0; b < p.bits_per_track; b++) {
-        const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), x0 = X(b * p.BL - lag, w), x1 = X((b + 1) * p.BL - lag, w);
-        ctx.fillStyle = want ? rgb(LUT.m, idxDiv(want * .45)) : css("--rule"); ctx.fillRect(x0 + .5, 2, x1 - x0 - 1, 18);
-        const gs = [], f = S.f;
-        d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); });
-        const ok = gs.filter(g => okAt(d, f, d.an[g], g)).length;
-        if (gs.length) {
-          const fw = (x1 - x0 - 1) * ok / gs.length;
-          ctx.fillStyle = css("--ok"); ctx.fillRect(x0 + .5, 24, fw, 4);
-          ctx.fillStyle = css("--bad"); ctx.fillRect(x0 + .5 + fw, 24, x1 - x0 - 1 - fw, 4);
-          if (x1 - x0 > 26) { ctx.fillStyle = css("--muted"); ctx.fillText(`${ok}/${gs.length}`, (x0 + x1) / 2, 35); }
+      for (let t = 0; t < p.n_tracks; t++) {
+        const y0 = (p.n_tracks - 1 - t) * row(p) + head(p);
+        for (let b = 0; b < p.bits_per_track; b++) {
+          const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), x0 = X(b * p.BL - lag, w), x1 = X((b + 1) * p.BL - lag, w);
+          ctx.fillStyle = want ? rgb(LUT.m, idxDiv(want * .45)) : css("--rule"); ctx.fillRect(x0 + .5, y0 + 2, x1 - x0 - 1, 18);
+          const gs = bitGrains(d, t, b), ok = gs.filter(g => okAt(d, f, d.an[g], g)).length;
+          if (gs.length && written(d, f, gs)) {
+            const fw = (x1 - x0 - 1) * ok / gs.length;
+            ctx.fillStyle = css("--ok"); ctx.fillRect(x0 + .5, y0 + 24, fw, 4);
+            ctx.fillStyle = css("--bad"); ctx.fillRect(x0 + .5 + fw, y0 + 24, x1 - x0 - 1 - fw, 4);
+            if (x1 - x0 > 26) { ctx.fillStyle = css("--muted"); ctx.fillText(`${ok}/${gs.length}`, (x0 + x1) / 2, y0 + 35); }
+          } else if (gs.length) {
+            ctx.fillStyle = css("--rule"); ctx.fillRect(x0 + .5, y0 + 24, x1 - x0 - 1, 4);
+            if (x1 - x0 > 26) { ctx.globalAlpha = .45; ctx.fillStyle = css("--muted"); ctx.fillText(`${ok}/${gs.length}`, (x0 + x1) / 2, y0 + 35); ctx.globalAlpha = 1; }
+          }
+          ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : want < 0 ? "↓" : "0", (x0 + x1) / 2, y0 + 11);
         }
-        ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : want < 0 ? "↓" : "0", (x0 + x1) / 2, 11);
+        if (bt && bt[0] === t) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.strokeRect(X(bt[1] * p.BL - lag, w) + 1, y0 + 1, X(p.BL, w) - 2, 20); }
+        if (p.n_tracks > 1) {
+          const label = `track ${t + 1}`;
+          ctx.save(); ctx.font = `600 10.5px ${css("--font")}`; ctx.textAlign = "left";
+          ctx.fillStyle = css(bt && bt[0] === t ? "--ink" : "--muted"); ctx.fillText(bt && bt[0] === t ? `${label} · writing` : label, 4, y0 - 6); ctx.restore();
+        }
       }
-      const bt = d.model.bit(d.steps[S.f]);
-      if (bt && bt[0] === t) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.strokeRect(X(bt[1] * p.BL - lag, w) + 1, 1, X(p.BL, w) - 2, 20); }
-      setNote("bits", [p.n_tracks > 1 ? `track ${t + 1} of ${p.n_tracks} (follows the section line)` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`]);
+      setNote("bits", [p.n_tracks > 1 ? `${p.n_tracks} tracks, as on the film; box: bit under the head` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`, "grey: not yet written"]);
     },
-    hover(x) {
-      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = trackOfSection(p), b = Math.floor((x + lag) / p.BL);
+    hover(x, py) {
+      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = rowTrack(p, py), b = Math.floor((x + lag) / p.BL);
       if (b < 0 || b >= p.bits_per_track) return "";
-      const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz);
-      const gs = []; d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); });
+      const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), gs = bitGrains(d, t, b);
       return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], ["intended", want > 0 ? "up (+z)" : want < 0 ? "down (−z)" : "no field"],
-        ["x", `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], [`✓ at ${timeText(d, d.time[S.f])}`, `${gs.filter(g => okAt(d, S.f, d.an[g], g)).length} / ${gs.length}`],
+        ["x", `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], !written(d, S.f, gs) && ["written", "not yet"], [`✓ at ${timeText(d, d.time[S.f])}`, `${gs.filter(g => okAt(d, S.f, d.an[g], g)).length} / ${gs.length}`],
         ["✓ at end", `${gs.filter(g => d.an[g].correct).length} / ${gs.length}`]]);
     },
   };
@@ -541,6 +573,7 @@ function sensorLane() {
       return kv([["x, y, z", `${fmt(x)}, ${fmt(y)}, ${zText(S.z)}`], ["B<sub>x</sub>", `${fmt(B(0))} mT`], ["B<sub>y</sub>", `${fmt(B(1))} mT`], ["B<sub>z</sub>", `${fmt(B(2))} mT`]]);
     },
     click(x, y) { S.ysec = y; redraw(); },
+    drag: dragSection,
   };
 }
 const zText = iz => `${fmt((iz + .5) * cur().e.dipole.cell_nm, 1)} nm`;
@@ -603,7 +636,7 @@ function setNote(id, parts) { const n = $("note-" + id); if (n) n.innerHTML = pa
 function buildLanes() {
   const d = cur();
   for (const id of ["lanes-top", "lanes-bottom"]) $(id).querySelectorAll(".lane").forEach(n => n.remove());
-  LANES = [];
+  LANES = []; S.tip = null;
   if (S.stage === "write" && d.an) LANES.push(bitsLane());
   LANES.push(filmLane(S.stage === "read" ? "Written" : "Film"));
   if (d.snaps && d.e.snapshots.volume) LANES.push(xzLane());
@@ -617,11 +650,13 @@ function buildLanes() {
     const xy = ev => { const [px, py, w, h] = pos(ev); return [XI(px, w), L.yMode ? py : (1 - py / h) * Ly(), h]; };
     L.canvas.addEventListener("mousemove", ev => {
       const [x, y, h] = xy(ev);
-      showTip(ev, L.hover ? L.hover(x, y, ev, h) : "");
+      if (L.drag && ev.buttons & 1) { L.dragged = true; L.drag(x, y); }
+      S.tip = () => showTip(ev, L.hover ? L.hover(x, y, ev, h) : "");   // re-run by drawAll so the tip follows the timeline
       S.hx = x; placeXhair(ev.clientX); redraw();
     });
-    L.canvas.addEventListener("mouseleave", () => { hideTip(); S.hov = -1; S.hx = null; document.querySelectorAll(".xhair").forEach(x => x.hidden = true); redraw(); });
-    if (L.click) L.canvas.addEventListener("click", ev => { const [x, y, h] = xy(ev); L.click(x, y, ev, h); });
+    L.canvas.addEventListener("mouseleave", () => { S.tip = null; hideTip(); S.hov = -1; S.hx = null; document.querySelectorAll(".xhair").forEach(x => x.hidden = true); redraw(); });
+    if (L.drag) L.canvas.addEventListener("mousedown", ev => { L.dragged = false; ev.preventDefault(); });   // no text selection while dragging
+    if (L.click) L.canvas.addEventListener("click", ev => { if (L.dragged) { L.dragged = false; return; } const [x, y, h] = xy(ev); L.click(x, y, ev, h); });
   }
   $("lanes-bottom").hidden = !LANES.some(L => L.group === "bottom");
 }
@@ -640,6 +675,7 @@ function drawAll() {
   for (const L of LANES) { const w = L.canvas.clientWidth; const { ctx, h } = fit(L.canvas, L.height(w)); L.draw(ctx, w, h); }
   drawAxis("axis-top"); if (!$("lanes-bottom").hidden) drawAxis("axis-bottom");
   drawScrub(); drawClock(); drawSt(); drawInspector();
+  if (S.tip) S.tip();
 }
 function drawAxis(id) {
   const c = $(id), { ctx, w, h } = fit(c, 20), L = Lx();
@@ -813,7 +849,9 @@ function stageFacts(st) {
     e.dipole && ["cell size", `${e.dipole.cell_nm} nm`]];
 }
 function legendHtml() {
-  return `<div class="legend-mini"><span><i class="ring"></i>laser isotherms, bold ${fmt(cur().e.Tc, 0)} K</span><span><i class="box"></i>head-field box</span></div>`;
+  const d = cur(), iso = isotherms(d).sort((a, b) => b.T - a.T).map(({ T, w, dash }) =>
+    `<span><svg width="30" height="10" aria-hidden="true"><line x1="1" y1="5" x2="29" y2="5" stroke="currentColor" stroke-width="${w}" stroke-dasharray="${dash.join(" ")}"/></svg>${fmt(T, 0)} K${T === d.e.Tc ? " (freezing T)" : ""}</span>`).join("");
+  return `<div class="legend-mini"><b>laser isotherms</b>${iso}<span><i class="box"></i>head-field box: red ↑, blue ↓, dashed 0 T</span></div>`;
 }
 
 function drawStory(d, g, a) {

@@ -90,8 +90,9 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
 - **Stages**: relax, write and read-back, as a chain at the top right. The address ends in `#write` etc., so a
   stage can be bookmarked.
 - **Lanes** share the film's x axis; hovering any lane draws one crosshair through all of them.
-  - *Bits*: intended bits of the track under the section line, shifted upstream by the freeze lag, with the
-    melted grains pointing along their bit's field at the current time (green) under each.
+  - *Bits*: intended bits of every track (one row per track, stacked as on the film), shifted upstream by the
+    freeze lag, with the melted grains pointing along their bit's field at the current time (green) under each; a box
+    marks the bit under the head.
   - *Film*: grains (shapes from the atoms), atom columns (through-thickness average) or one atomic layer; coloured
     by m_z, m_z against the intended bit (never-melted grains grey), peak laser temperature or the lowest |m|
     reached. Laser isotherms (bold: freezing temperature) and the head-field box with its direction and strength.
