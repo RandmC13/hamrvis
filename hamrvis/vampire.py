@@ -272,11 +272,17 @@ class Hamr:
         self.ne = int(round(self.BL / 2 / vdt)) + int(round(self.NPS / vdt))
         self.nt = self.bits_per_track * self.nb + 2 * self.ne
         self.laser_steps = self.n_tracks * self.nt
+        # hamr_continuous.cpp's bit loop counts from the end of the lead-in (ne) but stops at bits_per_track * nb, so a
+        # lead-in of a bit or more loses bits at the end of every track; the field stays off over their cells
+        self.written = max(0, min(self.bits_per_track, -(-(self.bits_per_track * self.nb - self.ne) // self.nb)))
+        w, bpt = self.written, self.bits_per_track
+        # sequence per bit cell (track * bits_per_track + bit); VAMPIRE takes bit t * written + b of its sequence
+        self.sequence = [self.sequence[t * w + b] if b < w else 0 for t in range(self.n_tracks) for b in range(bpt)]
 
     def params(self):
         """Everything the viewer needs to rebuild the head, as plain numbers."""
         keys = ("dt", "eq", "Tmin", "Tmax", "Hmin", "Hmax", "Hpeak", "field_uz", "rise", "fall", "Lx", "Ly", "Lz", "v", "BL", "TW", "pad", "NPS", "fwhm_x",
-                "fwhm_y", "box_x", "box_y", "sigma_x", "sigma_y", "step_nm", "nb", "ne", "bits_per_track", "nt",
+                "fwhm_y", "box_x", "box_y", "sigma_x", "sigma_y", "step_nm", "nb", "ne", "bits_per_track", "written", "nt",
                 "n_tracks", "laser_steps")
         p = {k: getattr(self, k) for k in keys}
         p["sequence"] = self.sequence
@@ -288,7 +294,12 @@ class Hamr:
         on = (k >= 1) & (k <= self.laser_steps)
         kk = np.clip(k, 1, None)
         track, j = (kk - 1) // self.nt, (kk - 1) % self.nt + 1
-        return -self.BL / 2 - self.NPS + (j + 1) * self.step_nm, self.TW * (track + 0.5) + self.pad, on
+        return -self.BL / 2 - self.NPS + (j + 1) * self.step_nm, self.track_y(track), on
+
+    def track_y(self, track):
+        """Head y (nm) on a track: VAMPIRE takes the track from bits written so far / bits_per_track (integer division),
+        so with bits lost per track (see written) later tracks land on earlier ones."""
+        return self.TW * (track * self.written // max(self.bits_per_track, 1) + 0.5) + self.pad
 
     def temperature(self, x, y, steps):
         hx, hy, on = self.head(steps)

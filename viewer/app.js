@@ -38,10 +38,12 @@ const kv = rows => `<dl class="facts">${rows.filter(Boolean).map(([k, v]) => `<d
 // Port of hamrvis/vampire.py Hamr (itself src/hamr/hamr_continuous.cpp + field_profiles.cpp). Steps count from
 // the start of the write run; lengths nm.
 function Model(p) {
+  const w = p.written ?? p.bits_per_track;                         // bits VAMPIRE's loop writes per track
+  const trackY = t => p.TW * (Math.floor(t * w / Math.max(p.bits_per_track, 1)) + 0.5) + p.pad;
   const head = step => {
     const k = step - p.eq, on = k >= 1 && k <= p.laser_steps, kk = Math.max(k, 1);
     const track = Math.floor((kk - 1) / p.nt), j = (kk - 1) % p.nt + 1;
-    return { x: -p.BL / 2 - p.NPS + (j + 1) * p.step_nm, y: p.TW * (track + 0.5) + p.pad, on, track, j };
+    return { x: -p.BL / 2 - p.NPS + (j + 1) * p.step_nm, y: trackY(track), on, track, j };
   };
   const field = step => {                                         // signed B_applied (T)
     const h = head(step); if (!h.on) return 0;
@@ -57,14 +59,14 @@ function Model(p) {
   const inBox = (x, y, h) => h.on && Math.abs(x - (h.x - p.NPS)) <= p.box_x / 2 && Math.abs(y - h.y) <= p.box_y / 2;
   const bit = step => {                                           // [track, bit] being written, or null
     const h = head(step), b = Math.floor((h.j - 1 - p.ne) / p.nb);
-    return h.on && h.j - 1 >= p.ne && b < p.bits_per_track ? [h.track, b] : null;
+    return h.on && h.j - 1 >= p.ne && b < w ? [h.track, b] : null;
   };
   const peakT = (x, y) => {                                       // hottest laser temperature ever at x, y
     const x0 = -p.BL / 2 - p.NPS + 2 * p.step_nm, x1 = -p.BL / 2 - p.NPS + (p.nt + 1) * p.step_nm;
     const dx = x < x0 ? x - x0 : x > x1 ? x - x1 : 0;
     let best = 0;
     for (let t = 0; t < p.n_tracks; t++) {
-      const yt = p.TW * (t + 0.5) + p.pad;
+      const yt = trackY(t);
       best = Math.max(best, Math.exp(-(dx * dx) / (2 * p.sigma_x ** 2) - ((y - yt) ** 2) / (2 * p.sigma_y ** 2)));
     }
     return p.Tmin + (p.Tmax - p.Tmin) * best;

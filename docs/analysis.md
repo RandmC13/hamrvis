@@ -7,8 +7,11 @@ From `src/hamr/hamr_continuous.cpp` and `src/hamr/field_profiles.cpp`. Steps cou
 
 - Steps per bit `nb = round(BL / v / dt)`; run-in and run-out `ne = round(BL / 2 / v / dt) + round(NPS / v / dt)`;
   bits per track `floor((Lx - 0.1 nm) / BL)`; steps per track `nt = bits_per_track nb + 2 ne`.
+- Bits actually written per track `w = ceil((bits_per_track nb - ne) / nb)` (the bit loop runs from `ne` to
+  `bits_per_track nb`), so `w < bits_per_track` when `ne >= nb`; bit `b < w` of track `t` takes sequence entry
+  `t w + b`, cells `b >= w` get no field.
 - Laser on for `1 <= k <= n_tracks nt`. Track `t = (k - 1) // nt`, step in track `j = (k - 1) % nt + 1`.
-- Laser centre `x = -BL/2 - NPS + (j + 1) v dt`, `y = TW (t + 0.5) + track_padding`.
+- Laser centre `x = -BL/2 - NPS + (j + 1) v dt`, `y = TW (floor(t w / bits_per_track) + 0.5) + track_padding`.
 - Laser temperature `T = Tmin + (Tmax - Tmin) exp(-dx^2 / 2 sx^2 - dy^2 / 2 sy^2)`, `s = FWHM / sqrt(8 ln 2)`.
 - Head field: inside bit `b` of a track (0-based step `i` in the bit) the magnitude rises linearly over `rise`
   steps and falls over the last `fall` steps; it is applied in the box `|x - (x_laser - NPS)| <= field_x / 2`,

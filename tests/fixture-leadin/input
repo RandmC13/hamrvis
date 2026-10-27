@@ -1,0 +1,42 @@
+# Tiny granular HAMR write used by tests/test_hamrvis.py (regenerate with tests/make_fixture.sh)
+create:crystal-structure = sc
+create:granular-film
+create:grain-size = 3.0 !nm
+create:grain-spacing = 0.3 !nm
+create:grain-structure-random-seed = 1234
+create:grain-shape-output
+create:grain-periodic-boundaries
+create:periodic-boundaries = xy
+create:grain-height = 1.2 !nm
+dimensions:unit-cell-size = 3.0 !A
+dimensions:system-size-x = 12 !nm
+dimensions:system-size-y = 6 !nm
+dimensions:system-size-z = 1.2 !nm
+material:file = m.mat
+sim:minimum-temperature = 300
+sim:maximum-temperature = 1000
+sim:equilibration-temperature = 300
+sim:time-step = 1.0 !fs
+sim:minimum-applied-field-strength = 0.0
+sim:maximum-applied-field-strength = 1.5
+sim:applied-field-unit-vector = 0,0,-1
+sim:equilibration-time-steps = 200
+sim:program = hamr-simulation
+sim:integrator = llg-heun
+hamr:laser-FWHM-x = 4 !nm
+hamr:laser-FWHM-y = 4 !nm
+hamr:head-speed = 1500 !m/s
+hamr:head-field-x = 3 !nm
+hamr:head-field-y = 4 !nm
+hamr:NPS = 2 !nm
+hamr:bit-size = 3 !nm
+hamr:track-size = 2.5 !nm
+hamr:number-of-bits = 6
+hamr:bit-sequence-type = single-tone-predefined
+hamr:field-rise-time = 0.1e-12 !s
+hamr:field-fall-time = 0.1e-12 !s
+output:output-rate = 10
+output:column-headers
+output:real-time
+output:applied-field-strength
+output:magnetisation
