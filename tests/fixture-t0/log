@@ -1,0 +1,65 @@
+27-10-2026 [04:50:18] Logfile opened
+27-10-2026 [04:50:18] Executable : vampire-serial
+27-10-2026 [04:50:18] Host name  : localhost:
+27-10-2026 [04:50:18] Directory  : /path/to/hamrvis/tests/fixture-t0
+27-10-2026 [04:50:18] Process ID : 93357
+27-10-2026 [04:50:18] Version    : 7.0.0
+27-10-2026 [04:50:18] Githash    : 08ef9cb0d10d6e11e73ab2b58c3f534ba467ac2d
+27-10-2026 [04:50:18] Opening main input file "input".
+27-10-2026 [04:50:18]    Loading text file input on root process
+27-10-2026 [04:50:18]    File successfully loaded on root process with 919 characters and size 0.000919 [ 7.9888 ] MB/s
+27-10-2026 [04:50:18] Parsing system parameters from main input file.
+27-10-2026 [04:50:18] Opening material file "m.mat".
+27-10-2026 [04:50:18]    Loading text file m.mat on root process
+27-10-2026 [04:50:18]    File successfully loaded on root process with 366 characters and size 0.000366 [ 2.42889 ] MB/s
+27-10-2026 [04:50:18] Parsing material file for parameters.
+27-10-2026 [04:50:18] Setting periodic boundary conditions in x,y directions
+27-10-2026 [04:50:18] Generating neighbour interactions for a lattice of 5 x 5 x 5 unit cells for neighbour calculation
+27-10-2026 [04:50:18] Granular film: requested mean diameter = 3 nm
+  Placed 9 grains, 0 vanished during weight fitting.
+  Measured mean equivalent diameter: primary = 3.00999 nm (sd 1.06106 nm)
+  Warning: grain seed packing did not fully relax (jammed with max overlap fraction 0.198445 after 800 iterations).
+  Warning: grain weight fitting did not fully converge (achieved tolerance 0.307464 after 500 iterations).
+27-10-2026 [04:50:18] Generating Voronoi Grains.........done!
+27-10-2026 [04:50:18] Calculating alloy properties of system
+27-10-2026 [04:50:18] Removed 0 non-magnetic atoms from system
+27-10-2026 [04:50:18] Determining atomic composition:
+27-10-2026 [04:50:18] Material 1 FePt makes up 100 % of all atoms ( 2624 atoms )
+27-10-2026 [04:50:18] Material 2 fill makes up 0 % of all atoms ( 0 atoms )
+27-10-2026 [04:50:18] Memory required for neighbourlist calculation:0.0256 MB
+27-10-2026 [04:50:18] Allocating memory for supercell array in neighbourlist calculation
+27-10-2026 [04:50:18] 	Allocating memory done
+27-10-2026 [04:50:18] Populating supercell array for neighbourlist calculation...
+27-10-2026 [04:50:18] 	Populating supercell array completed
+27-10-2026 [04:50:18] Memory required for neighbour list:0.1536 MB
+27-10-2026 [04:50:18] Generating neighbour list...
+27-10-2026 [04:50:18] 	Neighbour list calculation complete
+27-10-2026 [04:50:18] Deallocating supercell array for neighbour list calculation
+27-10-2026 [04:50:18] 	Supercell array deallocated
+27-10-2026 [04:50:18] Copying system data to optimised data structures.
+27-10-2026 [04:50:18] Number of atoms generated on rank 0: 2624
+27-10-2026 [04:50:18] Memory required for copying to performance array on rank 0: 0.398848 MB RAM
+27-10-2026 [04:50:18] Identifying surface atoms using global threshold value of 6
+27-10-2026 [04:50:18] 1752 surface atoms found.
+27-10-2026 [04:50:18] Memory required for creation of 1D neighbour list on rank 0: 0.041984 MB RAM
+27-10-2026 [04:50:18] Initialising data structures for exchange calculation.
+27-10-2026 [04:50:18] Unrolled exchange template requires 0.104576MB RAM
+27-10-2026 [04:50:18] Generated 9 grains
+27-10-2026 [04:50:18] Number of atoms generated: 2624
+27-10-2026 [04:50:18] Initializing vampire modules
+27-10-2026 [04:50:18] Macrocell size = 10,10,10 Angstroms
+27-10-2026 [04:50:18] Macrocells in x,y,z: 13	7	2
+27-10-2026 [04:50:18] Total number of macrocells: 182
+27-10-2026 [04:50:18] Memory required for macrocell arrays: 0.01456 MB
+27-10-2026 [04:50:18] Calculated (magnetic) atomic volume: 27 cubic Angstroms
+27-10-2026 [04:50:18] Number of local macrocells on rank 0: 72
+27-10-2026 [04:50:18] Initialising data structures for anisotropy calculation for 2 materials
+27-10-2026 [04:50:18] Initialising statistics module
+27-10-2026 [04:50:18] Starting Simulation with Program Time-Series...
+27-10-2026 [04:50:18] Initialising configuration output... done!
+27-10-2026 [04:50:18] Total coordinate data filesize: 0.094464 MB
+27-10-2026 [04:50:18] Total spin data filesize (per snapshot): 0.062976 MB
+27-10-2026 [04:50:18] Outputting atomic coordinate file to disk 0.246658 GB/s in 0.000382975 s
+27-10-2026 [04:50:18] Outputting configuration file 00000000 to disk 0.546781 GB/s in 0.000115176 s [ 0.000737424 s]
+27-10-2026 [04:50:18] Simulation run time [s]: 0.200263
+27-10-2026 [04:50:18] Simulation ended gracefully.

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=hamrvis-reduce
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --output=hamrvis-reduce-%j.log
+#------------------------------------------------------------------------------
+# Reduce a finished VAMPIRE HAMR run (or chain of runs) to a hamrvis bundle on
+# the cluster, next to the data, so only the bundle has to be copied home.
+#
+#   sbatch --account=<project> scripts/slurm-reduce.job <runs> <bundle> [reduce options]
+#
+# <runs> is a run directory or a folder of them (relax/, write/, read/). Run it
+# from the hamrvis checkout. Options are passed to 'python3 -m hamrvis reduce'
+# (for example --no-volume, --every 2, --tc 600).
+#   PY_MODULE  module providing python3 with numpy (default below)
+#------------------------------------------------------------------------------
+set -eu
+[ $# -ge 2 ] || { echo "usage: sbatch --account=<project> $0 <runs> <bundle> [options]"; exit 1; }
+runs=$1 bundle=$2; shift 2
+module purge
+module load ${PY_MODULE:-SciPy-bundle/2023.07-gfbf-2023a}
+python3 -c "import sys, numpy; print('python', sys.version.split()[0], 'numpy', numpy.__version__)"
+cd "${SLURM_SUBMIT_DIR:-.}"
+start=$(date +%s)
+python3 -m hamrvis reduce "$runs" -o "$bundle" -j ${SLURM_CPUS_PER_TASK:-4} "$@"
+echo "reduce: $(( $(date +%s) - start )) s"
+du -sh "$bundle"
+echo "Copy it home with:  rsync -av --info=progress2 <cluster>:$(readlink -f "$bundle") ."

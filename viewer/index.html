@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HAMR Run Viewer</title>
+<meta name="localhost:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="run"><h1 id="run-name">HAMR run</h1><p id="run-sub">Loading bundle…</p></div>
+  <nav class="chain" id="chain" aria-label="Simulation stage"></nav>
+</header>
+
+<div class="controls" id="controls">
+  <div class="seg" role="group" aria-label="Film view">
+    <button id="v-grains" aria-pressed="true">Grains</button>
+    <button id="v-atoms" aria-pressed="false">Atom columns</button>
+    <button id="v-layer" aria-pressed="false">One layer</button>
+  </div>
+  <label class="ctl" id="layer-ctl" hidden>Layer <input id="layer" type="range" min="0" max="0" value="0"><output id="layer-out"></output></label>
+  <div class="seg" role="group" aria-label="Colour by">
+    <button id="c-mz" aria-pressed="true">m<sub>z</sub></button>
+    <button id="c-agree" aria-pressed="false">m<sub>z</sub> vs intended</button>
+    <button id="c-peak" aria-pressed="false">Peak T</button>
+    <button id="c-minm" aria-pressed="false">Lowest |m|</button>
+  </div>
+  <label class="ctl" id="z-ctl" hidden>Sensor z <input id="zsel" type="range" min="0" max="0" value="0"><output id="z-out"></output></label>
+  <label class="ctl" id="w-ctl" hidden>Reader width <input id="rw" type="range" min="1" max="40" value="10"><output id="w-out"></output></label>
+  <span class="spacer"></span>
+  <button class="tool" id="save-png">Save PNG</button>
+  <button class="tool" id="theme" aria-label="Switch light or dark theme">Theme</button>
+</div>
+
+<main class="work">
+  <div class="main-col">
+    <div class="lanes" id="lanes-top"><div class="xhair" hidden><span></span></div></div>
+    <div class="axis"><span>x (nm)</span><canvas id="axis-top" aria-hidden="true"></canvas></div>
+    <div class="transport" id="transport">
+      <div class="play">
+        <button id="play" aria-label="Play">▶</button>
+        <select id="speed" aria-label="Playback speed, frames per tick">
+          <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1">1×</option>
+          <option value="3" selected>3×</option><option value="10">10×</option><option value="30">30×</option>
+        </select>
+      </div>
+      <canvas id="scrub" tabindex="0" role="slider" aria-label="Time"></canvas>
+      <div class="clock" id="clock"></div>
+    </div>
+    <div class="lanes" id="lanes-bottom"><div class="xhair" hidden><span></span></div></div>
+    <div class="axis" id="axis-bottom-row"><span>x (nm)</span><canvas id="axis-bottom" aria-hidden="true"></canvas></div>
+    <section class="st-panel" id="st-panel" hidden>
+      <div class="st-head"><h3>Space–time</h3><label class="toggle"><input type="checkbox" id="st-all"> all grains</label></div>
+      <canvas id="st" aria-label="Grain magnetisation against time, one row per grain"></canvas>
+      <div class="note" id="st-meta"></div>
+    </section>
+  </div>
+  <aside class="inspector" id="inspector" aria-live="polite"></aside>
+</main>
+
+<section class="section" id="analysis" hidden></section>
+<section class="section" id="details"></section>
+<div id="tip" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

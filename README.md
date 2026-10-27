@@ -1,0 +1,100 @@
+# hamrvis
+
+Viewer for VAMPIRE heat-assisted magnetic recording (HAMR) simulations: the relaxation, the write and the
+read-back of a run, on one down-track axis.
+
+It has two parts:
+
+1. **`hamrvis reduce`** turns finished run directories into a compact *bundle*. It runs where the data is (on the
+   cluster), so only the bundle is copied home. The 90 GB of spin snapshots of a 8.7M-atom write become about
+   about 2.2 GB, or about 180 MB without the per-layer data (estimated from the final snapshot).
+2. **`hamrvis view`** serves one general viewer for any bundle on `localhost` and opens it in the browser. The
+   same viewer works for every run, so improvements apply to old runs too.
+
+Only Python 3.8+ with numpy is needed; the viewer is plain HTML and JavaScript with no build step.
+
+## Typical workflow
+
+On cluster, after the chain has finished (`<chain>` holds `relax/`, `write/`, `read/`):
+
+```bash
+cd ~/hamrvis                        # a clone of this repository
+sbatch --account=<project> scripts/slurm-reduce.job <chain> ~/scratch/bundles/<name>
+```
+
+On the laptop:
+
+```bash
+rsync -av --info=progress2 <cluster>:scratch/bundles/<name> ~/hamr-bundles/
+python3 -m hamrvis view ~/hamr-bundles/<name>         # opens http://127.0.0.1:8737/
+```
+
+For a run on your own machine, reduce it directly: `python3 -m hamrvis reduce runs/my-run -o bundles/my-run`.
+
+To share a run as one file (for example with a colleague, or as a localhost.ai artifact):
+
+```bash
+python3 -m hamrvis export bundles/<name> -o <name>.html --grain-step 8      # must stay under 16 MB for localhost.ai
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories. Each run is classified as relax, write (`sim:program = hamr-simulation`) or read (dipole field output) from its input. Options: `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers). |
+| `python3 -m hamrvis view <bundle>` | Serves the viewer and the bundle on `127.0.0.1:8737` (`-p` to change). |
+| `python3 -m hamrvis export <bundle> -o page.html` | One self-contained page. `--grain-step N` keeps every N-th grain frame, `--snap-step N` every N-th snapshot, `--no-volume`, `--artifact` (no document skeleton, for localhost.ai). |
+| `python3 -m unittest discover tests` | Tests (needs node for the viewer-model test). |
+
+## What the run needs to write
+
+The reducer reads what VAMPIRE writes; the more of it there is, the more the viewer shows.
+
+| Input keywords | Gives |
+|---|---|
+| `output:column-headers`, `output:real-time`, `output:magnetisation` | The time line under the transport bar (required: `output` must have column headers) |
+| `grain:real-time`, `grain:magnetisation`, `grain:output-rate` | Grain view, grain life stories, space-time diagram, write analysis |
+| `create:grain-shape-output` | Grain outlines |
+| `config:atoms`, `config:atoms-output-rate`, `config:output-format = binary` | Atom-column view, one-layer view, cross-section, lowest-\|m\| map |
+| `dipole:output-dipole-field` (read stage) | Stray-field map, field section, read-back waveform |
+| `output:applied-field-strength` | Not needed: the head field is rebuilt from the input, exactly as VAMPIRE applies it |
+
+## How much is kept
+
+Everything VAMPIRE writes per grain (`grain.txt`, every frame) and per run (`output`) is kept at full time resolution.
+Every spin snapshot is kept (none are dropped unless `--every` is given), reduced to the mean spin of the magnetic
+atoms in each 0.25 nm column through the film and in each 0.5 nm x 0.5 nm cell of every atomic layer, stored to
+1/127 per component. The reducer checks itself on every run and records the result (shown under Run details): each
+stored value against the exact mean, and each snapshot's per-grain average against `grain.txt`. Grain shapes are
+taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/decisions.md` (Accuracy).
+
+## Viewer
+
+- **Stages**: relax, write and read-back, as a chain at the top right. The address ends in `#write` etc., so a
+  stage can be bookmarked.
+- **Lanes** share the film's x axis; hovering any lane draws one crosshair through all of them.
+  - *Bits*: intended bits, shifted upstream by the freeze lag, with the fraction of melted grains written as
+    intended under each.
+  - *Film*: grains (shapes from the atoms), atom columns (through-thickness average) or one atomic layer; coloured
+    by m_z, m_z against the intended bit (never-melted grains grey), peak laser temperature or the lowest |m|
+    reached. Laser isotherms (bold: freezing temperature) and the head-field box with its direction and strength.
+    The dashed line is the section line: click the film to move it.
+  - *Transport* directly under the film: play/pause (space), 0.1x to 30x, step (arrow keys, shift for 50 frames).
+  - *x–z section*: slice through the section line from the nearest snapshot (height x2).
+  - Read stage: *stray field* B_z at a chosen sensor height, *field section* (x–z), *read-back* waveform (mean B_z
+    across a reader band of chosen width) with the intended transitions.
+- **Inspector**: hover a grain, or click to keep it: outcome, decision moment and circumstances, and its life story
+  (laser temperature, |m|, m_z, field felt). Click the chart to jump there.
+- **Space–time**: one row per melted grain (or all), sorted by x, time left to right; dashed: laser passes the
+  grain; tick: decision moment. Click to select the grain and jump to that time.
+- **Analysis** (write): success, freezing temperature and lag, where each grain froze, outcomes by circumstance.
+- **Save PNG** stacks the lanes into one image (local viewer only).
+
+Colours: magnetisation is blue (down) to red (up); fields are green (down) to purple (up), so a field never reads
+as magnetisation; written-as-intended is green, wrong is ochre.
+
+## More
+
+- `docs/decisions.md`: why it is built this way, the choices made with you, and what was left out.
+- `docs/bundle-format.md`: the bundle files.
+- `docs/analysis.md`: how the write analysis classifies grains, and the head model.

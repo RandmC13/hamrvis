@@ -1,0 +1,51 @@
+[33m[33m[0m[0m                                                _          
+                                               (_)         
+                    __   ____ _ _ __ ___  _ __  _ _ __ ___ 
+                    \ \ / / _` | '_ ` _ \| '_ \| | '__/ _ \
+                     \ V / (_| | | | | | | |_) | | | |  __/
+                      \_/ \__,_|_| |_| |_| .__/|_|_|  \___|
+                                         | |               
+                                         |_|               
+
+                      Version 7.0.0 Oct 17 2026 04:10:08
+
+             Git commit: 08ef9cb0d10d6e11e73ab2b58c3f534ba467ac2d
+
+  Licensed under the GNU Public License(v2). See licence-gpl for details.
+
+      Main Developers: Richard F L Evans, Sarah Jenkins, Andrea Meo, 
+                       Matthew Ellis, Mara Strungaru, Sergiu Ruta
+ 
+                       See developers/authors.txt for details
+ 
+                       Compiled with:  GNU C++ Compiler
+                       Compiler Flags: 
+
+================================================================================
+Tue Oct 27 04:24:11 2026
+================================================================================
+Initialising system variables
+Creating system
+Granular film: requested mean diameter = 3 nm
+  Placed 9 grains, 0 vanished during weight fitting.
+  Measured mean equivalent diameter: primary = 3.00999 nm (sd 1.06106 nm)
+  Warning: grain seed packing did not fully relax (jammed with max overlap fraction 0.198445 after 800 iterations).
+  Warning: grain weight fitting did not fully converge (achieved tolerance 0.307464 after 500 iterations).
+Generating Voronoi Grains.........[32m[32mdone!
+[0m[0mGenerating neighbour list..........[32m[32mdone!
+[0m[0mCopying system data to optimised data structures.
+Using generic/normalised form of exchange interaction with 6 total interactions.
+Generated 9 grains
+Number of atoms generated: 2624
+Starting Simulation with Program HAMR-Simulation...
+ Equilibration terminated, enabling laser ...
+ Setting initial field magnitude to: 0 T
+ Bit sequence to be written: -1 1 -1 
+ Bits to be written: 3, in x,y: 3, 1
+ Head velocity: 1500 m/s
+ Time per bit: 2e-12 s
+ Time per track: 9.334e-12 s
+ New total simulation time: 1.9333e-11 s
+Simulation run time [s]: 4.72586
+[32m[32mSimulation ended gracefully.
+[0m[0m

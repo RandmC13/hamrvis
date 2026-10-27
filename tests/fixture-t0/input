@@ -1,0 +1,31 @@
+# Tiny granular film at 0 K used by tests/test_hamrvis.py to check snapshot reading against grain.txt
+create:crystal-structure = sc
+create:granular-film
+create:grain-size = 3.0 !nm
+create:grain-spacing = 0.3 !nm
+create:grain-structure-random-seed = 1234
+create:grain-periodic-boundaries
+create:periodic-boundaries = xy
+create:grain-height = 1.2 !nm
+dimensions:unit-cell-size = 3.0 !A
+dimensions:system-size-x = 12 !nm
+dimensions:system-size-y = 6 !nm
+dimensions:system-size-z = 1.2 !nm
+material:file = m.mat
+sim:temperature = 0
+sim:time-step = 1.0 !fs
+sim:applied-field-strength = 2.0
+sim:applied-field-unit-vector = 1,0,1
+sim:total-time-steps = 600
+sim:program = time-series
+sim:integrator = llg-heun
+output:output-rate = 100
+output:column-headers
+output:real-time
+output:magnetisation
+grain:real-time
+grain:magnetisation
+grain:output-rate = 100
+config:atoms
+config:output-format = binary
+config:atoms-output-rate = 2
