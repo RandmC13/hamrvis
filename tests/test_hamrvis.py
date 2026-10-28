@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -85,6 +86,69 @@ class TrackRules(unittest.TestCase):
             self.assertEqual(m.shape[1:], (9, 4))
 
 
+class WindowSnapshots(unittest.TestCase):
+    """Window snapshots (hamr:active-window): a series built from fixture-run in which each snapshot after the first
+    takes only the atoms of a few ranges from the run (the rest keep their spins), written once as full snapshots
+    and once as window snapshots holding just those ranges, as VAMPIRE writes them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.full, cls.window = (os.path.join(cls.tmp, d) for d in ("full", "window"))
+        for d in (cls.full, cls.window):
+            shutil.copytree(RUN, d, ignore=shutil.ignore_patterns("spins-*"))
+        cls.truth, state = [], None
+        for k, (idx, _, files, _) in enumerate(vp.snapshots(RUN)):
+            new = vp.read_spins(files[0])
+            n = len(new)
+            ranges = [] if state is None else [(k * 37 % n, min(50, n - k * 37 % n)), (n // 2, n // 3)]
+            if state is None:
+                state = new.copy()
+            for a, c in ranges:
+                state[a:a + c] = new[a:a + c]
+            cls.truth.append(state.copy())
+            meta = open(files[0][:-4] + "meta").read()
+            name = f"spins-{idx:08d}"
+            for d, window in ((cls.full, False), (cls.window, 0 < k < 10)):
+                with open(os.path.join(d, name + ".meta"), "w") as f:
+                    f.write(meta + "Spin data: window\n" if window else meta)
+                with open(os.path.join(d, name + ".data"), "wb") as f:
+                    if window:
+                        np.array([n, len(ranges)], np.uint64).tofile(f)
+                        np.array(ranges, np.uint64).tofile(f)
+                        np.concatenate([state[a:a + c] for a, c in ranges]).tofile(f)
+                    else:
+                        np.array([n], np.uint64).tofile(f)
+                        state.tofile(f)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_series_rebuilds_every_snapshot(self):
+        snaps = vp.snapshots(self.window)
+        self.assertEqual([w for *_, w in snaps], [False] + [True] * 9 + [False] * (len(snaps) - 10))
+        for (idx, _, spins), truth in zip(vp.spin_series(snaps), self.truth):
+            np.testing.assert_array_equal(spins[0], truth, err_msg=f"snapshot {idx}")
+
+    def test_reduce_same_as_full_snapshots(self):
+        out = {}
+        for name, run in (("full", self.full), ("window", self.window)):
+            out[name] = os.path.join(self.tmp, "bundle-" + name)
+            reduce.reduce([run], out[name], workers=2)
+        compared = 0
+        for dp, _, files in os.walk(out["full"]):
+            for f in files:
+                if f == "manifest.json":
+                    continue
+                a = os.path.join(dp, f)
+                b = os.path.join(out["window"], os.path.relpath(a, out["full"]))
+                read = (lambda p: gzip.decompress(Path(p).read_bytes())) if f.endswith(".gz") else (lambda p: Path(p).read_bytes())
+                self.assertEqual(read(a), read(b), msg=os.path.relpath(a, out["full"]))
+                compared += 1
+        self.assertGreater(compared, 10)
+
+
 class Reduce(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -134,7 +198,7 @@ class Reduce(unittest.TestCase):
     def test_column_average_matches_spins(self):
         e = self.man["stages"]["write"]
         G = e["snapshots"]["grid"]
-        idx, _, files = vp.snapshots(RUN)[-1]
+        idx, _, files, _ = vp.snapshots(RUN)[-1]
         q = np.frombuffer(gzip.open(os.path.join(self.bundle, "write", "top", f"{idx:08d}.i8.gz")).read(), np.int8)
         q = q.reshape(3, G["ny"], G["nx"])
         typ, xyz, _ = vp.read_coords(vp.coord_files(RUN)[0])

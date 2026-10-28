@@ -14,6 +14,7 @@ Bundle layout (see docs/bundle-format.md):
     read/dipole_atoms.u16             atoms per dipole cell (0 = field probe cell)
 Empty pixels hold -128 in the int8 arrays. Everything is little-endian.
 """
+import contextlib
 import gzip
 import json
 import math
@@ -114,22 +115,70 @@ def _bin_snapshot(job):
         return job[0], None, None, str(err)
 
 
-def _bin_snapshot_checked(job):
-    idx, files, out_dir = job
+def _bin_spins(spins):
+    """Column, volume and grain sums (top, vol, gs) of the spins of every data file of a snapshot."""
     g, nG = _W["grid"], _W["n_grains"]
     top = np.zeros((3, g.ny * g.nx))
     vol = np.zeros((3, g.nz * g.vy * g.vx)) if _W["volume"] else None
     gs = np.zeros((3, nG + 1))                     # last bin: atoms of no listed grain
-    for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
-        s = vp.read_spins(f)
-        if len(s) != len(mask):
-            raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
+    for s, (mask, kt, kv, gi) in zip(spins, _W["bins"]):
         s = s[mask]
         for c in range(3):
             top[c] += np.bincount(kt, s[:, c], minlength=top.shape[1])
             gs[c] += np.bincount(gi, s[:, c], minlength=nG + 1)
             if vol is not None:
                 vol[c] += np.bincount(kv, s[:, c], minlength=vol.shape[1])
+    return top, vol, gs
+
+
+def _bin_snapshot_checked(job):
+    idx, files, out_dir = job
+    spins = []
+    for f, (mask, *_) in zip(files, _W["bins"]):
+        s = vp.read_spins(f)
+        if len(s) != len(mask):
+            raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
+        spins.append(s)
+    return _write_snapshot(idx, out_dir, *_bin_spins(spins))
+
+
+def _window_series(snaps, out_dir, keep):
+    """Results of the snapshots in keep, in order, for a run with window snapshots (hamr:active-window): the
+    sums of a complete snapshot are binned in full, and a window snapshot changes them by the binned
+    difference of the spins it holds (new minus old), so only the atoms near the head are touched."""
+    state, sums = None, None
+    for idx, t, files, window in snaps:
+        if not window:
+            state = []
+            for f, (mask, *_) in zip(files, _W["bins"]):
+                s = vp.read_spins(f)
+                if len(s) != len(mask):
+                    raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
+                state.append(s)
+            sums = _bin_spins(state)
+        elif state is None:
+            raise IOError(f"snapshot {idx} is a window snapshot with no complete snapshot before it")
+        else:
+            top, vol, gs = sums
+            nG = _W["n_grains"]
+            for s, f, (mask, kt, kv, gi), midx in zip(state, files, _W["bins"], _W["mask_index"]):
+                n, pos, new = vp.read_window_spins(f)
+                if n != len(mask):
+                    raise IOError(f"{f}: {n} atoms, but its coordinate file has {len(mask)}")
+                d, sel = new - s[pos], mask[pos]
+                k = midx[pos[sel]]
+                for c in range(3):
+                    top[c] += np.bincount(kt[k], d[sel, c], minlength=top.shape[1])
+                    gs[c] += np.bincount(gi[k], d[sel, c], minlength=nG + 1)
+                    if vol is not None:
+                        vol[c] += np.bincount(kv[k], d[sel, c], minlength=vol.shape[1])
+                s[pos] = new
+        if idx in keep:
+            yield _write_snapshot(idx, out_dir, *sums)
+
+
+def _write_snapshot(idx, out_dir, top, vol, gs):
+    g = _W["grid"]
     qt = _q8(top, _W["ct"])
     _write_gz(os.path.join(out_dir, "top", f"{idx:08d}.i8.gz"), qt.reshape(3, g.ny, g.nx))
     if vol is not None:
@@ -208,7 +257,7 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
         G["magnetic_atoms"] = na[:nG].astype(int).tolist()
         G.pop("outline", None)
 
-    snaps = vp.snapshots(run_dir)
+    snaps = all_snaps = vp.snapshots(run_dir)
     if not snaps:
         return
     snaps = snaps[::every] if snaps[-1] in snaps[::every] else snaps[::every] + [snaps[-1]]
@@ -217,14 +266,20 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
         os.makedirs(os.path.join(out_dir, d), exist_ok=True)
     np.minimum(ct, 255).astype(np.uint8).tofile(os.path.join(out_dir, "top_count.u8"))
     np.minimum(cv, 255).astype(np.uint8).tofile(os.path.join(out_dir, "vol_count.u8"))
-    _W.update(grid=grid, bins=bins, ct=ct, cv=cv, volume=volume, n_grains=nG)
-    jobs = [(i, files, out_dir) for i, _, files in snaps]
-    step_of = {i: int(round(t / entry["dt"])) for i, t, _ in snaps}
+    _W.update(grid=grid, bins=bins, ct=ct, cv=cv, volume=volume, n_grains=nG,
+              mask_index=[np.cumsum(mask) - 1 for mask, *_ in bins])
+    jobs = [(i, files, out_dir) for i, _, files, _ in snaps]
+    step_of = {i: int(round(t / entry["dt"])) for i, t, _, _ in snaps}
     workers = workers or min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
     min_m = np.full(ct.size, np.inf, np.float32)
     checks, q_max, t0, bad = [], 0.0, time.time(), set()
-    with multiprocessing.get_context("fork").Pool(workers) as pool:
-        for n, (idx, m, gs, q_err) in enumerate(pool.imap_unordered(_bin_snapshot, jobs), 1):
+    windowed = any(w for *_, w in all_snaps)
+    if windowed:
+        log("  window snapshots (hamr:active-window): read in order, each updating the previous one")
+    with contextlib.nullcontext() if windowed else multiprocessing.get_context("fork").Pool(workers) as pool:
+        results = _window_series(all_snaps, out_dir, {i for i, *_ in snaps}) if windowed else \
+            pool.imap_unordered(_bin_snapshot, jobs)
+        for n, (idx, m, gs, q_err) in enumerate(results, 1):
             if m is None:
                 log(f"  WARNING: snapshot {idx} skipped: {q_err}")
                 bad.add(idx)
@@ -248,7 +303,7 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
     min_m[ct == 0] = 0
     np.rint(np.clip(min_m, 0, 1) * 255).astype(np.uint8).tofile(os.path.join(out_dir, "min_m.u8"))
     entry["snapshots"] = dict(grid=grid.info(), volume=volume, skipped=sorted(bad),
-                              frames=[dict(index=i, time=t) for i, t, _ in snaps if i not in bad])
+                              frames=[dict(index=i, time=t) for i, t, *_ in snaps if i not in bad])
     same = [c[2] for c in checks if c[1] == 0]
     prev = [c[2] for c in checks if c[1] == 1]
     entry["checks"] = dict(column_rounding_max=q_max,

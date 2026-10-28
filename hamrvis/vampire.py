@@ -203,10 +203,47 @@ def read_spins(path):
     return s
 
 
+def read_window_spins(path):
+    """(atoms in the file, positions int64 [m], float64 [m, 3] spins) of one window snapshot data file
+    (hamr:active-window): the spins of the atoms that changed since the previous snapshot, stored as
+    (first position, count) ranges of positions in the coordinate file's order."""
+    with open(path, "rb") as f:
+        n, r = (int(v) for v in np.fromfile(f, np.uint64, 2))
+        ranges = np.fromfile(f, np.uint64, 2 * r).astype(np.int64).reshape(r, 2)
+        m = int(ranges[:, 1].sum())
+        s = np.fromfile(f, np.float64, 3 * m)
+    if len(s) != 3 * m:
+        raise IOError(f"{path}: truncated ({len(s) // 3} of {m} spins), copy caught mid-transfer?")
+    pos = np.concatenate([np.arange(a, a + c) for a, c in ranges]) if r else np.zeros(0, np.int64)
+    if r and pos.max() >= n:
+        raise IOError(f"{path}: positions beyond its {n} atoms")
+    return n, pos, s.reshape(m, 3)
+
+
+def spin_series(snaps):
+    """Yield (index, time, [float64 [n, 3] spins per data file]) for snapshots(run_dir), with every window
+    snapshot applied to the spins of the snapshots before it. The arrays are updated in place: copy to keep."""
+    state = None
+    for idx, t, files, window in snaps:
+        if not window:
+            state = [read_spins(f) for f in files]
+        elif state is None:
+            raise IOError(f"snapshot {idx} is a window snapshot with no complete snapshot before it")
+        else:
+            for s, f in zip(state, files):
+                n, pos, new = read_window_spins(f)
+                if n != len(s):
+                    raise IOError(f"{f}: {n} atoms, but the snapshot before it has {len(s)}")
+                s[pos] = new
+        yield idx, t, state
+
+
 def snapshots(run_dir):
-    """[(index, time s, [data files])] of the spin snapshots, in order. Snapshot files are found by probing
-    spins-00000000.meta, ...01.meta, ... (directory listings of copied folders have been seen to miss files),
-    falling back to a glob for runs that do not start at 0 (restarts)."""
+    """[(index, time s, [data files], window)] of the spin snapshots, in order; window is True for a window
+    snapshot (hamr:active-window), which holds only the atoms that changed since the previous snapshot (see
+    spin_series). Snapshot files are found by probing spins-00000000.meta, ...01.meta, ... (directory listings
+    of copied folders have been seen to miss files), falling back to a glob for runs that do not start at 0
+    (restarts)."""
     res, i = [], 0
     metas = []
     while os.path.exists(p := os.path.join(run_dir, f"spins-{i:08d}.meta")):
@@ -217,7 +254,7 @@ def snapshots(run_dir):
     for p in metas:
         head, files = _meta_files(p)
         idx = int(re.search(r"spins-(\d+)", os.path.basename(p)).group(1))
-        res.append((idx, float(head["Time"].split()[0]), files))
+        res.append((idx, float(head["Time"].split()[0]), files, head.get("Spin data", "full").strip() == "window"))
     return res
 
 

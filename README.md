@@ -68,6 +68,9 @@ Nothing is tied to one run. The reducer reads everything from the run's own file
 - `grain.txt` columns follow the input's `grain:` keywords in order (`time-steps` or `real-time` etc.);
 - snapshots in binary or text, single file or one file per node or process; truncated copies are skipped with a
   warning;
+- window snapshots of `hamr:active-window` runs (only the atoms near the head, `Spin data: window` in the `.meta`
+  file) are read in order, each updating the snapshot before it; a truncated window snapshot stops the reduction,
+  since the snapshots after it depend on it;
 - the grids adapt to the lattice and size: atom columns at the atomic pitch up to 4M pixels, then coarser; layers
   at 2 x 2 sites (`--layer-factor 1` stores every atom) up to 2.5M cells per snapshot, then coarser;
 - grain shapes come from the atoms' grain IDs; coordinate files without grain IDs (older VAMPIRE text format)
