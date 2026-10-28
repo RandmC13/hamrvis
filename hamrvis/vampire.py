@@ -259,6 +259,21 @@ def snapshots(run_dir):
 
 
 # ----------------------------------------------------------------------------------------------- HAMR head model
+def _bits_written_per_track(run_dir):
+    """"Written bit" lines in the run's log before the end of its first track, or None without a whole track."""
+    n = 0
+    try:
+        with open(os.path.join(run_dir, "log"), errors="replace") as f:
+            for line in f:
+                if "Written bit " in line:
+                    n += 1
+                elif "Head position at end of track" in line:
+                    return n
+    except OSError:
+        pass
+    return None
+
+
 class Hamr:
     """Head position, laser temperature and field box of a hamr-simulation run, as in src/hamr/hamr_continuous.cpp.
     Steps count from the start of the run's sim::time (equilibration included)."""
@@ -309,9 +324,12 @@ class Hamr:
         self.ne = int(round(self.BL / 2 / vdt)) + int(round(self.NPS / vdt))
         self.nt = self.bits_per_track * self.nb + 2 * self.ne
         self.laser_steps = self.n_tracks * self.nt
-        # hamr_continuous.cpp's bit loop counts from the end of the lead-in (ne) but stops at bits_per_track * nb, so a
-        # lead-in of a bit or more loses bits at the end of every track; the field stays off over their cells
-        self.written = max(0, min(self.bits_per_track, -(-(self.bits_per_track * self.nb - self.ne) // self.nb)))
+        # bits written per track, as the run's log records them. Before VAMPIRE's bit loop was fixed it counted from
+        # the end of the lead-in (ne) but stopped at bits_per_track * nb, so a lead-in of a bit or more lost bits at the
+        # end of every track (the field stays off over their cells); that model is used when the log has no whole track
+        self.written = _bits_written_per_track(run_dir)
+        if self.written is None:
+            self.written = max(0, min(self.bits_per_track, -(-(self.bits_per_track * self.nb - self.ne) // self.nb)))
         w, bpt = self.written, self.bits_per_track
         # sequence per bit cell (track * bits_per_track + bit); VAMPIRE takes bit t * written + b of its sequence
         self.sequence = [self.sequence[t * w + b] if b < w else 0 for t in range(self.n_tracks) for b in range(bpt)]
@@ -335,7 +353,7 @@ class Hamr:
 
     def track_y(self, track):
         """Head y (nm) on a track: VAMPIRE takes the track from bits written so far / bits_per_track (integer division),
-        so with bits lost per track (see written) later tracks land on earlier ones."""
+        so in runs that lost bits per track (see written) later tracks land on earlier ones."""
         return self.TW * (track * self.written // max(self.bits_per_track, 1) + 0.5) + self.pad
 
     def temperature(self, x, y, steps):

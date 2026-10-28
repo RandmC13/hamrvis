@@ -2,7 +2,8 @@
 
 fixture-run/ is a tiny granular HAMR write made by VAMPIRE (3 bits, 2624 atoms, 11 binary snapshots, output with
 B_applied); regenerate it with tests/make_fixture.sh if the formats change. fixture-leadin/ is the same film with a
-lead-in (half a bit + NPS) longer than a bit and two tracks: VAMPIRE reports 6 bits but writes 4 (see its log).
+lead-in (half a bit + NPS) longer than a bit and two tracks, made by VAMPIRE before its bit loop was fixed: it reports
+6 bits but writes 4 (see its log). fixture-leadin-fixed is the same input run by the fixed VAMPIRE: all 6 bits.
 """
 import gzip
 import json
@@ -21,13 +22,14 @@ from hamrvis import export, reduce, vampire as vp
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = os.path.join(HERE, "fixture-run")
 LEADIN = os.path.join(HERE, "fixture-leadin")
+LEADIN_FIXED = os.path.join(HERE, "fixture-leadin-fixed")
 RUN_T0 = os.path.join(HERE, "fixture-t0")    # 0 K time series: snapshot and grain.txt share step 0
 APP = os.path.join(HERE, "..", "viewer", "app.js")
 
 
 class FieldModel(unittest.TestCase):
     def test_matches_vampire_output(self):
-        for run in (RUN, LEADIN):
+        for run in (RUN, LEADIN, LEADIN_FIXED):
             h = vp.Hamr(run)
             cols, out = vp.read_output(run)
             steps = np.rint(out[:, cols.index("Real_time")] / h.dt).astype(int)
@@ -41,6 +43,14 @@ class FieldModel(unittest.TestCase):
         self.assertEqual(h.track_y(1), h.track_y(0))
         self.assertAlmostEqual(h.track_y(0), 1.25)
         self.assertEqual(vp.Hamr(RUN).written, 3)
+
+    def test_fixed_bit_loop_writes_every_bit(self):
+        # the same input run by the fixed VAMPIRE: every bit written, the second track at its own y (log: 3.75 nm)
+        h = vp.Hamr(LEADIN_FIXED)
+        self.assertEqual((h.n_tracks, h.bits_per_track, h.written), (2, 3, 3))
+        self.assertEqual(h.sequence, [-1, 1, -1, 1, -1, 1])
+        self.assertAlmostEqual(h.track_y(0), 1.25)
+        self.assertAlmostEqual(h.track_y(1), 3.75)
 
     def test_default_peak_is_hmax_minus_hmin(self):
         # VAMPIRE's defaults are Hmax = +1 T, Hmin = -1 T, so an input that sets neither writes at 2 T
