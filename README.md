@@ -1,7 +1,8 @@
 # hamrvis
 
-Viewer for VAMPIRE heat-assisted magnetic recording (HAMR) simulations: the relaxation, the write and the
-read-back of a run, on one down-track axis.
+Viewer for VAMPIRE heat-assisted magnetic recording (HAMR) simulations. Give it a folder of runs (for example a
+Monte Carlo relaxation, one or more HAMR writes, dipole-field reads, in any number and order) and it builds one page
+with a tab for each run, showing what that kind of simulation calls for, on one down-track axis.
 
 It has two parts:
 
@@ -15,7 +16,7 @@ Only Python 3.8+ with numpy is needed; the viewer is plain HTML and JavaScript w
 
 ## Typical workflow
 
-On cluster, after the chain has finished (`<chain>` holds `relax/`, `write/`, `read/`):
+On cluster, after the runs have finished (`<chain>` is a folder holding one subfolder per run):
 
 ```bash
 cd ~/hamrvis                        # a clone of this repository
@@ -41,7 +42,7 @@ python3 -m hamrvis export bundles/<name> -o <name>.html --grain-step 8      # mu
 
 | Command | What it does |
 |---|---|
-| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories. Each run is classified as relax, write (`sim:program = hamr-simulation`) or read (dipole field output) from its input. Options: `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers). |
+| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories; each run becomes a tab (see *Runs and tabs*). Options: `--order DIR ...` (tab order by folder name), `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers). |
 | `python3 -m hamrvis view <bundle>` | Serves the viewer and the bundle on `127.0.0.1:8737` (`-p` to change). |
 | `python3 -m hamrvis export <bundle> -o page.html` | One self-contained page. `--grain-step N` keeps every N-th grain frame, `--snap-step N` every N-th snapshot, `--no-volume`, `--artifact` (no document skeleton, for localhost.ai). |
 | `python3 -m unittest discover tests` | Tests (needs node for the viewer-model test). |
@@ -58,6 +59,23 @@ The reducer reads what VAMPIRE writes; the more of it there is, the more the vie
 | `config:atoms`, `config:atoms-output-rate`, `config:output-format = binary` | Atom-column view, one-layer view, cross-section, lowest-\|m\| map |
 | `dipole:output-dipole-field` (read stage) | Stray-field map, field section, read-back waveform |
 | `output:applied-field-strength` | Not needed: the head field is rebuilt from the input, exactly as VAMPIRE applies it |
+
+## Runs and tabs
+
+`reduce` finds every run in the folders given and works out what each one is from its own files; nothing is
+assumed about the workflow.
+
+- **Kinds of run** (`hamrvis/runs.py`, `TYPES`): *Write* (`sim:program = hamr-simulation`: head model, bits lane,
+  write analysis, space-time), *Read-back* (dipole field output: stray-field map, field section, read-back
+  waveform), *Monte Carlo* (Monte Carlo integrators: time in MC steps). Any other run gets a tab titled with its
+  VAMPIRE program showing what it wrote (grain and atom views, time line, run details). Field maps are shown for any
+  run that wrote `dipole-field.txt`.
+- **Order**: the order the runs started (the first time stamp of each `log`), since runs chained by checkpoints run
+  one after another; then folder name. `--order` sets it by hand.
+- **Runs continued over several jobs** (`sim:load-checkpoint = continue`, same input otherwise, resuming at a step
+  the previous job reached) are one run and one tab; where jobs overlap the later one is used.
+- **Comparisons**: a run after a write (a read, an anneal, ...) is compared with the nearest write before it: bit
+  cells, bit polarity and "m_z vs intended" use that write's bits.
 
 ## Runs it adapts to
 
@@ -90,8 +108,9 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
 
 ## Viewer
 
-- **Stages**: relax, write and read-back, as a chain at the top right. The address ends in `#write` etc., so a
-  stage can be bookmarked.
+- **Tabs**: one per run, in run order, at the top right (title from the kind of run, then the folder name). The
+  address ends in `#<folder>`, so a run can be bookmarked; bundles made before version 2 keep `#relax`, `#write`,
+  `#read`.
 - **Lanes** share the film's x axis; hovering any lane draws one crosshair through all of them.
   - *Bits*: intended bits of every track (one row per track, stacked as on the film), shifted upstream by the
     freeze lag, with the melted grains pointing along their bit's field at the current time (green) under each; a box

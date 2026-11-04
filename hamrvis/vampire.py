@@ -49,17 +49,6 @@ class Input:
         return float(v) * _UNITS[unit or default_unit]
 
 
-# ----------------------------------------------------------------------------------------------- run classification
-def stage_of(run_dir):
-    """'relax', 'write' or 'read' from the input: HAMR program = write, dipole output = read, anything else = relax."""
-    inp = Input(run_dir)
-    if inp.str("sim:program") == "hamr-simulation":
-        return "write"
-    if inp.has("dipole:output-dipole-field") or inp.has("dipole:output-atomistic-dipole-field"):
-        return "read"
-    return "relax"
-
-
 # ----------------------------------------------------------------------------------------------- text tables
 def read_output(run_dir):
     """(column names, float64 [rows, cols]) of the 'output' file; needs output:column-headers."""
@@ -259,16 +248,46 @@ def snapshots(run_dir):
 
 
 # ----------------------------------------------------------------------------------------------- HAMR head model
-def _bits_written_per_track(run_dir):
-    """"Written bit" lines in the run's log before the end of its first track, or None without a whole track."""
-    n = 0
+def _bits_written_per_track(run_dirs):
+    """Bits VAMPIRE wrote on the first track, from the "Written bit N" lines of the logs of a run's segments (in
+    order) before the first end of track; None without a whole track. Distinct N are counted, since a run resumed
+    from a checkpoint replays its loop and logs the bits before the checkpoint again."""
+    seen = set()
+    for d in run_dirs:
+        try:
+            with open(os.path.join(d, "log"), errors="replace") as f:
+                for line in f:
+                    m = re.search(r"Written bit (\d+)", line)
+                    if m:
+                        seen.add(int(m.group(1)))
+                    elif "Head position at end of track" in line:
+                        return len(seen)
+        except OSError:
+            pass
+    return None
+
+
+def log_start(run_dir):
+    """Wall-clock time the run started, from the first time stamp of its log ("dd-mm-yyyy [hh:mm:ss]"), as a
+    sortable string, or None."""
+    try:
+        with open(os.path.join(run_dir, "log"), errors="replace") as f:
+            m = re.match(r"(\d\d)-(\d\d)-(\d{4}) \[(\d\d:\d\d:\d\d)\]", f.readline())
+    except OSError:
+        return None
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)} {m.group(4)}" if m else None
+
+
+def checkpoint_resume_step(run_dir):
+    """Step at which a run continued from a checkpoint (sim:load-checkpoint = continue), from its log, or None."""
+    if Input(run_dir).str("sim:load-checkpoint") != "continue":
+        return None
     try:
         with open(os.path.join(run_dir, "log"), errors="replace") as f:
             for line in f:
-                if "Written bit " in line:
-                    n += 1
-                elif "Head position at end of track" in line:
-                    return n
+                m = re.search(r"Checkpoint file loaded at sim::time (\d+)", line)
+                if m:
+                    return int(m.group(1))
     except OSError:
         pass
     return None
@@ -278,7 +297,8 @@ class Hamr:
     """Head position, laser temperature and field box of a hamr-simulation run, as in src/hamr/hamr_continuous.cpp.
     Steps count from the start of the run's sim::time (equilibration included)."""
 
-    def __init__(self, run_dir):
+    def __init__(self, run_dir, segments=None):
+        """segments: all directories of a run continued over several jobs (default: run_dir alone)."""
         inp = Input(run_dir)
         n = inp.num
         self.dt = n("sim:time-step", 1e-15, "s")
@@ -327,7 +347,7 @@ class Hamr:
         # bits written per track, as the run's log records them. Before VAMPIRE's bit loop was fixed it counted from
         # the end of the lead-in (ne) but stopped at bits_per_track * nb, so a lead-in of a bit or more lost bits at the
         # end of every track (the field stays off over their cells); that model is used when the log has no whole track
-        self.written = _bits_written_per_track(run_dir)
+        self.written = _bits_written_per_track(segments or [run_dir])
         if self.written is None:
             self.written = max(0, min(self.bits_per_track, -(-(self.bits_per_track * self.nb - self.ne) // self.nb)))
         w, bpt = self.written, self.bits_per_track

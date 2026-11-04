@@ -1,0 +1,33 @@
+create:crystal-structure = sc
+create:granular-film
+create:grain-size = 3.0 !nm
+create:grain-spacing = 0.3 !nm
+create:grain-structure-random-seed = 1234
+create:grain-shape-output
+create:grain-periodic-boundaries
+create:periodic-boundaries = xy
+create:grain-height = 1.2 !nm
+dimensions:unit-cell-size = 3.0 !A
+dimensions:system-size-x = 12 !nm
+dimensions:system-size-y = 6 !nm
+dimensions:system-size-z = 1.2 !nm
+material:file = m.mat
+output:output-rate = 10
+output:column-headers
+output:real-time
+output:applied-field-strength
+output:magnetisation
+grain:real-time
+grain:magnetisation
+grain:output-rate = 50
+config:atoms
+config:output-format = binary
+sim:temperature = 300
+sim:equilibration-temperature = 300
+sim:time-step = 1.0 !fs
+sim:equilibration-time-steps = 0
+sim:total-time-steps = 3000
+sim:program = time-series
+sim:integrator = llg-heun
+config:atoms-output-rate = 1000
+sim:save-checkpoint = end

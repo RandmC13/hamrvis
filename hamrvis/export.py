@@ -23,9 +23,10 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
     man = json.load(open(os.path.join(bundle, "manifest.json")))
     man = copy.deepcopy(man)
     files = {}
-    for st, e in man["stages"].items():
+    from .reduce import bundle_runs
+    for st, e in bundle_runs(man):
         sd = os.path.join(bundle, st)
-        for name in ("output.f32", "top_count.u8", "vol_count.u8", "min_m.u8", "grain_map.i16", "dipole.f32",
+        for name in ("output.f32", "output.f64", "top_count.u8", "vol_count.u8", "min_m.u8", "grain_map.i16", "dipole.f32",
                      "dipole_atoms.u16"):
             p = os.path.join(sd, name)
             if os.path.exists(p) and (volume or name != "vol_count.u8"):

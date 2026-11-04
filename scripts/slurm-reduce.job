@@ -10,7 +10,7 @@
 #
 #   sbatch --account=<project> scripts/slurm-reduce.job <runs> <bundle> [reduce options]
 #
-# <runs> is a run directory or a folder of them (relax/, write/, read/). Run it
+# <runs> is a run directory or a folder of them (one tab per run). Run it
 # from the hamrvis checkout. Options are passed to 'python3 -m hamrvis reduce'
 # (for example --no-volume, --every 2, --tc 600).
 #   PY_MODULE  module providing python3 with numpy (default below)

@@ -1,17 +1,17 @@
-"""Reduce VAMPIRE HAMR run directories (relax / write / read) to a compact bundle the viewer loads.
+"""Reduce VAMPIRE runs (any mix of HAMR writes, Monte Carlo runs, dipole reads, ...) to a compact bundle the viewer loads.
 
 Bundle layout (see docs/bundle-format.md):
-    manifest.json                     run parameters, stage list, array index
-    <stage>/output.f32                'output' file, [rows, cols]
-    <stage>/grains.i16                grain.txt per-grain block, [frames, grains, 4] x 1/32767
-    <stage>/grain_lead.f64            grain.txt leading columns (time, temperature), [frames, n_lead]
-    <stage>/top/NNNNNNNN.i8.gz        snapshot NNNNNNNN: column-averaged magnetisation, [3, ny, nx] x 1/127
-    <stage>/vol/NNNNNNNN.i8.gz        snapshot NNNNNNNN: per-layer magnetisation, [3, nz, ny/2, nx/2] x 1/127
-    <stage>/top_count.u8, vol_count.u8  magnetic atoms per pixel (0 = no magnetic atom: grain boundary)
-    <stage>/min_m.u8                  lowest column |m| any snapshot reached, x 1/255
-    <stage>/grain_map.i16             grain index of the magnetic atoms in each column, [ny, nx] (-1: none)
-    read/dipole.f32                   hierarchical dipole cell field, [3, nz, ny, nx] (T)
-    read/dipole_atoms.u16             atoms per dipole cell (0 = field probe cell)
+    manifest.json                     run list (in run order), parameters, array index
+    <run>/output.f64                  'output' file, [rows, cols]
+    <run>/grains.i16                grain.txt per-grain block, [frames, grains, 4] x 1/32767
+    <run>/grain_lead.f64            grain.txt leading columns (time, temperature), [frames, n_lead]
+    <run>/top/NNNNNNNN.i8.gz        snapshot NNNNNNNN: column-averaged magnetisation, [3, ny, nx] x 1/127
+    <run>/vol/NNNNNNNN.i8.gz        snapshot NNNNNNNN: per-layer magnetisation, [3, nz, ny/2, nx/2] x 1/127
+    <run>/top_count.u8, vol_count.u8  magnetic atoms per pixel (0 = no magnetic atom: grain boundary)
+    <run>/min_m.u8                  lowest column |m| any snapshot reached, x 1/255
+    <run>/grain_map.i16             grain index of the magnetic atoms in each column, [ny, nx] (-1: none)
+    <run>/dipole.f32                  dipole cell field, [3, nz, ny, nx] (T)
+    <run>/dipole_atoms.u16             atoms per dipole cell (0 = field probe cell)
 Empty pixels hold -128 in the int8 arrays. Everything is little-endian.
 """
 import contextlib
@@ -20,14 +20,16 @@ import json
 import math
 import multiprocessing
 import os
+import re
 import shutil
 import time
 
 import numpy as np
 
+from . import runs as rn
 from . import vampire as vp
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 # write analysis thresholds (see docs/analysis.md)
 DECISION = 0.05     # m_z|m| below this in the final direction = not yet decided
@@ -190,10 +192,35 @@ def _write_snapshot(idx, out_dir, top, vol, gs):
     return idx, m.astype(np.float32), gs, float(q_err)
 
 
-def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None,
+def _resume_steps(dirs):
+    """Step at which each segment after the first took over (None for the first)."""
+    return [None] + [vp.checkpoint_resume_step(d) for d in dirs[1:]]
+
+
+def run_snapshots(dirs, dt):
+    """Snapshots of a run over its segments: each segment's own up to the step the next one resumed from (the later
+    job wins where they overlap)."""
+    res, stops = [], _resume_steps(dirs)[1:] + [None]
+    for d, stop in zip(dirs, stops):
+        res += [s for s in vp.snapshots(d) if stop is None or s[1] / dt <= stop + 0.5]
+    idx = [s[0] for s in res]
+    if len(set(idx)) != len(idx):
+        raise SystemExit(f"{dirs}: snapshot numbers repeat across the jobs of this run")
+    return res
+
+
+def _join_rows(parts, times, dirs, dt):
+    """Rows of each segment's table up to the step the next segment resumed from, concatenated."""
+    stops = _resume_steps(dirs)[1:] + [None]
+    keep = [a if stop is None or t is None else a[t / dt <= stop + 0.5] for a, t, stop in zip(parts, times, stops)]
+    return np.concatenate(keep) if len(keep) > 1 else keep[0]
+
+
+def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None,
                  layer_factor=None):
     """From the atom coordinates: exact top-down grain map, grain centres; then bin every spin snapshot onto the
     grids and check each snapshot's per-grain mean spin against grain.txt at the same time step."""
+    run_dir = dirs[0]                                     # the jobs of a run share its atoms
     cfiles = vp.coord_files(run_dir)
     if not cfiles:
         return
@@ -257,7 +284,7 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
         G["magnetic_atoms"] = na[:nG].astype(int).tolist()
         G.pop("outline", None)
 
-    snaps = all_snaps = vp.snapshots(run_dir)
+    snaps = all_snaps = run_snapshots(dirs, entry["dt"])
     if not snaps:
         return
     snaps = snaps[::every] if snaps[-1] in snaps[::every] else snaps[::every] + [snaps[-1]]
@@ -315,34 +342,48 @@ def reduce_atoms(run_dir, out_dir, entry, grain_steps=None, grain_m=None, volume
         f"earlier (max {max(prev, default=0):.1e}, median {np.median(prev) if prev else 0:.1e}: one step of motion)")
 
 
-# ------------------------------------------------------------------------------------------------ stage tables
-def reduce_tables(run_dir, out_dir, entry):
-    cols, out = vp.read_output(run_dir)
-    out.astype(np.float32).tofile(os.path.join(out_dir, "output.f32"))
-    entry["output"] = dict(columns=cols, rows=len(out))
+# ------------------------------------------------------------------------------------------------ tables
+def reduce_tables(dirs, out_dir, entry):
+    """'output' and grain.txt of a run (its segments joined), grain list and outlines."""
+    run_dir, dt = dirs[0], entry["dt"]
+    parts = [vp.read_output(d) for d in dirs]
+    cols = parts[0][0]
+    if any(c != cols for c, _ in parts):
+        raise SystemExit(f"{dirs}: the jobs of this run have different output columns")
+    ti = cols.index("Real_time") if "Real_time" in cols else None
+    out = _join_rows([o for _, o in parts], [None if ti is None else o[:, ti] for _, o in parts], dirs, dt)
+    out.astype(np.float64).tofile(os.path.join(out_dir, "output.f64"))   # float32 loses steps beyond 2^24
+    entry["output"] = dict(columns=cols, rows=len(out), dtype="f64")
     gc = vp.read_grain_coordinates(run_dir)
     outlines = vp.grain_outlines(gc, vp.read_grain_shapes(run_dir))
     entry["grains"] = dict(
         id=gc[:, 0].astype(int).tolist(), x=np.round(gc[:, 1], 3).tolist(), y=np.round(gc[:, 2], 3).tolist(),
         atoms=gc[:, 3].astype(int).tolist(),
         outline=[None if o is None else np.round(o, 3).tolist() for o in outlines])
-    if os.path.exists(os.path.join(run_dir, "grain.txt")):
-        log("  parsing grain.txt")
-        cols, m = vp.read_grain_file(run_dir, len(gc))
+    if not all(os.path.exists(os.path.join(d, "grain.txt")) for d in dirs):
+        return None, None
+    log("  parsing grain.txt")
+    leads, ms = [], []
+    for d in dirs:
+        cols, m = vp.read_grain_file(d, len(gc))
         if "time" in cols:
             t = cols["time"]
         elif "step" in cols:
-            t = cols["step"] * entry["dt"]
+            t = cols["step"] * dt
         else:   # neither grain:real-time nor grain:time-steps: frames are written every grain:output-rate steps
-            rate = vp.Input(run_dir).num("grain:output-rate", 1, "s")
-            t = (np.arange(len(m)) + 1) * rate * entry["dt"]
+            if len(dirs) > 1:
+                raise SystemExit(f"{dirs}: grain.txt needs grain:real-time or grain:time-steps to join the jobs")
+            rate = vp.Input(d).num("grain:output-rate", 1, "s")
+            t = (np.arange(len(m)) + 1) * rate * dt
             entry["grain_time_note"] = "grain.txt has no time column: frame times assumed from grain:output-rate"
-        lead = np.stack([t, cols.get("temperature", np.full(len(m), np.nan))], axis=1)
-        np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
-        lead.tofile(os.path.join(out_dir, "grain_lead.f64"))
-        entry["grain_series"] = dict(frames=len(m), lead=["time", "temperature"], columns=list(cols))
-        return lead, m
-    return None, None
+        leads.append(np.stack([t, cols.get("temperature", np.full(len(m), np.nan))], axis=1))
+        ms.append(m)
+    lead = _join_rows(leads, [l[:, 0] for l in leads], dirs, dt)
+    m = _join_rows(ms, [l[:, 0] for l in leads], dirs, dt)
+    np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
+    lead.tofile(os.path.join(out_dir, "grain_lead.f64"))
+    entry["grain_series"] = dict(frames=len(m), lead=["time", "temperature"], columns=list(cols))
+    return lead, m
 
 
 def reduce_dipole(run_dir, out_dir, entry):
@@ -382,7 +423,9 @@ def write_analysis(h, entry, lead, m, Tc=None):
 
     if Tc is None:   # effective freezing temperature: median centre temperature at the decision of heated grains
         sel = heated & (np.abs(final) >= SETTLED)
-        Tc = float(np.median(T[dec[sel], np.nonzero(sel)[0]])) if sel.any() else None
+        Td = T[dec[sel], np.nonzero(sel)[0]]
+        Td = Td[Td > h.Tmin + 0.05 * (h.Tmax - h.Tmin)]     # decisions under the laser, not thermal flips far from it
+        Tc = float(np.median(Td)) if len(Td) else None
         entry["Tc_source"] = "median grain-centre laser temperature at the decision moment of heated grains"
     else:
         entry["Tc_source"] = "given on the command line"
@@ -421,71 +464,84 @@ def write_analysis(h, entry, lead, m, Tc=None):
     for r in res:
         cats[r["category"]] = cats.get(r["category"], 0) + 1
     written = [r for r in res if r["intended"] != 0 and r["category"] != "unheated"]
-    log(f"  Tc {Tc:.0f} K, lag {lag:.2f} nm; categories {cats}; correct {sum(r['correct'] for r in res)}"
+    log(f"  Tc {Tc or 0:.0f} K, lag {lag:.2f} nm; categories {cats}; correct {sum(r['correct'] for r in res)}"
         f" of {len(written)} heated grains inside the bit windows")
 
 
 def share_grain_map(out, manifest):
-    """Stages without coordinate output (e.g. a read that wrote no config) take the grain map and centres of a stage
-    of the same structure (same size and grains); only then fall back to the approximate Voronoi outlines."""
-    st = manifest["stages"]
-    donor = next((s for s in ("write", "relax", "read") if s in st and "grain_map" in st[s]), None)
-    for s, e in st.items():
-        if "grain_map" in e or donor is None:
+    """Runs without coordinate output (e.g. a read that wrote no config) take the grain map and centres of the
+    nearest run of the same structure (same size and grains); only then fall back to the approximate Voronoi
+    outlines."""
+    runs = manifest["runs"]
+    for i, e in enumerate(runs):
+        if "grain_map" in e:
             continue
-        d = st[donor]
-        if d["size_nm"] == e["size_nm"] and d["grains"]["id"] == e["grains"]["id"]:
-            shutil.copy(os.path.join(out, donor, "grain_map.i16"), os.path.join(out, s, "grain_map.i16"))
-            e["grain_map"] = dict(d["grain_map"], from_stage=donor)
-            for k in ("x", "y", "magnetic_atoms"):
-                e["grains"][k] = d["grains"][k]
-            e["grains"].pop("outline", None)
-    with open(os.path.join(out, "manifest.json"), "w") as f:
+        near = sorted(range(len(runs)), key=lambda j: (abs(j - i), j > i))
+        donor = next((runs[j] for j in near if "grain_map" in runs[j] and "from_run" not in runs[j]["grain_map"]
+                      and runs[j]["size_nm"] == e["size_nm"] and runs[j]["grains"]["id"] == e["grains"]["id"]), None)
+        if donor is None:
+            continue
+        shutil.copy(os.path.join(out, donor["id"], "grain_map.i16"), os.path.join(out, e["id"], "grain_map.i16"))
+        e["grain_map"] = dict(donor["grain_map"], from_run=donor["id"])
+        for k in ("x", "y", "magnetic_atoms"):
+            e["grains"][k] = donor["grains"][k]
+        e["grains"].pop("outline", None)
+    _write_manifest(out, manifest)
+
+
+def _write_manifest(out, manifest):
+    tmp = os.path.join(out, "manifest.json.tmp")
+    with open(tmp, "w") as f:
         json.dump(manifest, f, separators=(",", ":"))
+    os.replace(tmp, os.path.join(out, "manifest.json"))
+
+
+def bundle_runs(man):
+    """[(run id, entry)] of a manifest, in run order; version 1 bundles had the fixed stages relax, write, read."""
+    if "runs" in man:
+        return [(e["id"], e) for e in man["runs"]]
+    return [(s, man["stages"][s]) for s in ("relax", "write", "read") if s in man["stages"]]
+
+
+def _prepare_out(out):
+    """Make out ready for a new bundle: an existing bundle's run folders and manifest are removed (so no files of
+    an earlier reduction stay behind); any other non-empty directory is refused."""
+    if os.path.isdir(out) and os.listdir(out):
+        mp = os.path.join(out, "manifest.json")
+        if not os.path.exists(mp):
+            raise SystemExit(f"{out} is not empty and holds no hamrvis bundle: choose a new or empty directory")
+        for rid, _ in bundle_runs(json.load(open(mp))):
+            if re.fullmatch(r"[A-Za-z0-9._-]+", rid) and rid not in (".", ".."):   # never leave the bundle
+                shutil.rmtree(os.path.join(out, rid), ignore_errors=True)
+        os.remove(mp)
+    os.makedirs(out, exist_ok=True)
 
 
 # ------------------------------------------------------------------------------------------------ driver
-def find_runs(paths):
-    """Run directories among paths and their immediate subfolders. A path given directly must hold an 'input'; in a
-    scanned folder only subfolders with both 'input' and 'output' (a run that ran) count, so copies of inputs or
-    source trees next to the runs are skipped."""
-    runs = []
-    for p in paths:
-        if os.path.exists(os.path.join(p, "input")):
-            runs.append(p)
-            continue
-        for d in sorted(os.listdir(p)):
-            q = os.path.join(p, d)
-            if os.path.exists(os.path.join(q, "input")):
-                if os.path.exists(os.path.join(q, "output")):
-                    runs.append(q)
-                else:
-                    log(f"skipping {q}: it has an input file but no output (not a run)")
-    return runs
-
-
-def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None):
-    runs = find_runs(paths)
+def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None, order=None):
+    runs = rn.find(paths, order)
     if not runs:
         raise SystemExit(f"no run directories (folders with an 'input' file) in {paths}")
-    os.makedirs(out, exist_ok=True)
+    _prepare_out(out)
+    dirs = [os.path.abspath(d) for r in runs for d in r.dirs]
     manifest = dict(format="hamrvis-bundle", version=FORMAT_VERSION, created=time.strftime("%Y-%m-%d %H:%M:%S"),
-                    name=name or os.path.basename(os.path.commonpath([os.path.abspath(r) for r in runs]) if len(runs) > 1
-                                                 else os.path.abspath(runs[0])), stages={})
-    for run in runs:
-        stage = vp.stage_of(run)
-        if stage in manifest["stages"]:
-            raise SystemExit(f"two {stage} runs ({manifest['stages'][stage]['source']} and {run}): pass the run "
-                             f"directories you want explicitly, or reduce them into separate bundles")
-        log(f"{stage}: {run}")
-        sd = os.path.join(out, stage)
-        os.makedirs(sd, exist_ok=True)
+                    name=name or os.path.basename(os.path.commonpath(dirs) if len(dirs) > 1 else dirs[0]), runs=[])
+    last_hamr = None
+    for r in runs:
+        log(f"{r.id} ({r.type}): " + ", ".join(r.dirs))
+        sd = os.path.join(out, r.id)
+        os.makedirs(sd)
+        run = r.dir
         inp = vp.Input(run)
-        e = dict(source=os.path.abspath(run), input={k: v for k, (v, u) in inp.keys.items()},
+        e = dict(id=r.id, type=r.type, title=r.title, source=os.path.abspath(run),
+                 segments=[os.path.abspath(d) for d in r.dirs],
+                 input={k: v for k, (v, u) in inp.keys.items()},
                  input_units={k: u for k, (v, u) in inp.keys.items() if u},
-                 dt=inp.num("sim:time-step", 1e-15, "s"),
+                 dt=inp.num("sim:time-step", 1e-15, "s"), monte_carlo=rn.is_monte_carlo(inp),
                  size_nm=[inp.num(f"dimensions:system-size-{a}") for a in "xyz"],
                  magnetic_types=magnetic_types(run))
+        if r.type != "hamr" and last_hamr:
+            e["ref"] = last_hamr                       # the write whose bits this run is compared with
         for f in ("log", "stdout", "time.txt"):
             if os.path.exists(os.path.join(run, f)):
                 e.setdefault("files", []).append(f)
@@ -493,21 +549,23 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
         if os.path.exists(meta):
             e["n_atoms"] = int(vp._meta_files(meta)[0].get("Number of atoms", "0").split()[0])
         e["source_files"] = {f: [os.path.getsize(os.path.join(run, f)), int(os.path.getmtime(os.path.join(run, f)))]
-                             for f in ("input", "output", "grain.txt", "dipole-field.txt") if os.path.exists(os.path.join(run, f))}
-        lead, m = reduce_tables(run, sd, e)
+                             for f in ("input", "output", "grain.txt", "dipole-field.txt")
+                             if os.path.exists(os.path.join(run, f))}
+        lead, m = reduce_tables(r.dirs, sd, e)
         gsteps = np.rint(lead[:, 0] / e["dt"]).astype(np.int64) if lead is not None else None
-        reduce_atoms(run, sd, e, gsteps, m, volume, every, workers, layer_factor)
-        if stage == "write":
-            h = vp.Hamr(run)
+        reduce_atoms(r.dirs, sd, e, gsteps, m, volume, every, workers, layer_factor)
+        if r.type == "hamr":
+            h = vp.Hamr(run, r.dirs)
             e["hamr"] = h.params()
             if lead is not None:
                 write_analysis(h, e, lead, m, Tc)
-        if stage == "read" and os.path.exists(os.path.join(run, "dipole-field.txt")):
+            last_hamr = r.id
+        last = r.dirs[-1]                              # field maps are written at the end of a run
+        if os.path.exists(os.path.join(last, "dipole-field.txt")):
             log("  gridding dipole-field.txt")
-            reduce_dipole(run, sd, e)
-        manifest["stages"][stage] = e
-        with open(os.path.join(out, "manifest.json"), "w") as f:   # after each stage, so a partial bundle opens
-            json.dump(manifest, f, separators=(",", ":"))
+            reduce_dipole(last, sd, e)
+        manifest["runs"].append(e)
+        _write_manifest(out, manifest)                 # after each run, so a partial bundle opens
     share_grain_map(out, manifest)
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     log(f"bundle {out}: {size / 1e6:.1f} MB")

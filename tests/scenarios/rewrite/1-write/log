@@ -1,0 +1,93 @@
+04-11-2026 [13:27:46] Logfile opened
+04-11-2026 [13:27:46] Executable : vampire-serial
+04-11-2026 [13:27:46] Host name  : localhost:
+04-11-2026 [13:27:46] Directory  : /path/to/hamrvis/tests/runs/rewrite/1-write
+04-11-2026 [13:27:46] Process ID : 49989
+04-11-2026 [13:27:46] Version    : 7.0.0
+04-11-2026 [13:27:46] Githash    : 
+04-11-2026 [13:27:46] Opening main input file "input".
+04-11-2026 [13:27:46]    Loading text file input on root process
+04-11-2026 [13:27:46]    File successfully loaded on root process with 1374 characters and size 0.001374 [ 13.6491 ] MB/s
+04-11-2026 [13:27:46] Parsing system parameters from main input file.
+04-11-2026 [13:27:46] Opening material file "m.mat".
+04-11-2026 [13:27:46]    Loading text file m.mat on root process
+04-11-2026 [13:27:46]    File successfully loaded on root process with 366 characters and size 0.000366 [ 2.37631 ] MB/s
+04-11-2026 [13:27:46] Parsing material file for parameters.
+04-11-2026 [13:27:46] Setting periodic boundary conditions in x,y directions
+04-11-2026 [13:27:46] Generating neighbour interactions for a lattice of 5 x 5 x 5 unit cells for neighbour calculation
+04-11-2026 [13:27:46] Granular film: requested mean diameter = 3 nm
+  Placed 9 grains, 0 vanished during weight fitting.
+  Measured mean equivalent diameter: primary = 3.00999 nm (sd 1.06106 nm)
+  Warning: grain seed packing did not fully relax (jammed with max overlap fraction 0.198445 after 800 iterations).
+  Warning: grain weight fitting did not fully converge (achieved tolerance 0.307464 after 500 iterations).
+04-11-2026 [13:27:46] Generating Voronoi Grains.........done!
+04-11-2026 [13:27:46] Calculating alloy properties of system
+04-11-2026 [13:27:46] Removed 0 non-magnetic atoms from system
+04-11-2026 [13:27:46] Determining atomic composition:
+04-11-2026 [13:27:46] Material 1 FePt makes up 100 % of all atoms ( 2624 atoms )
+04-11-2026 [13:27:46] Material 2 fill makes up 0 % of all atoms ( 0 atoms )
+04-11-2026 [13:27:46] Memory required for neighbourlist calculation:0.0256 MB
+04-11-2026 [13:27:46] Allocating memory for supercell array in neighbourlist calculation
+04-11-2026 [13:27:46] 	Allocating memory done
+04-11-2026 [13:27:46] Populating supercell array for neighbourlist calculation...
+04-11-2026 [13:27:46] 	Populating supercell array completed
+04-11-2026 [13:27:46] Memory required for neighbour list:0.1536 MB
+04-11-2026 [13:27:46] Generating neighbour list...
+04-11-2026 [13:27:46] 	Neighbour list calculation complete
+04-11-2026 [13:27:46] Deallocating supercell array for neighbour list calculation
+04-11-2026 [13:27:46] 	Supercell array deallocated
+04-11-2026 [13:27:46] Copying system data to optimised data structures.
+04-11-2026 [13:27:46] Number of atoms generated on rank 0: 2624
+04-11-2026 [13:27:46] Memory required for copying to performance array on rank 0: 0.398848 MB RAM
+04-11-2026 [13:27:46] Identifying surface atoms using global threshold value of 6
+04-11-2026 [13:27:46] 1752 surface atoms found.
+04-11-2026 [13:27:46] Memory required for creation of 1D neighbour list on rank 0: 0.041984 MB RAM
+04-11-2026 [13:27:46] Initialising data structures for exchange calculation.
+04-11-2026 [13:27:46] Unrolled exchange template requires 0.104576MB RAM
+04-11-2026 [13:27:46] Generated 9 grains
+04-11-2026 [13:27:46] Number of atoms generated: 2624
+04-11-2026 [13:27:46] Host memory after system creation: current 8.54688 MB (largest rank), 8.54688 MB (all ranks); peak 8.69141 MB (largest rank), 8.69141 MB (all ranks)
+04-11-2026 [13:27:46] Initializing vampire modules
+04-11-2026 [13:27:46] Macrocell size = 10,10,10 Angstroms
+04-11-2026 [13:27:46] Macrocells in x,y,z: 13	7	2
+04-11-2026 [13:27:46] Total number of macrocells: 182
+04-11-2026 [13:27:46] Memory required for macrocell arrays: 0.01456 MB
+04-11-2026 [13:27:46] Calculated (magnetic) atomic volume: 27 cubic Angstroms
+04-11-2026 [13:27:46] Number of local macrocells on rank 0: 72
+04-11-2026 [13:27:46] Initialising data structures for hamr calculation.
+04-11-2026 [13:27:46] Creating singletone bit sequence ...
+04-11-2026 [13:27:46] Checking length of bit sequence ...
+04-11-2026 [13:27:46] Initialising data structures for anisotropy calculation for 2 materials
+04-11-2026 [13:27:46] Initialising statistics module
+04-11-2026 [13:27:46] Starting Simulation with Program HAMR-Simulation...
+04-11-2026 [13:27:46] Initialising configuration output... done!
+04-11-2026 [13:27:46] Total coordinate data filesize: 0.094464 MB
+04-11-2026 [13:27:46] Total spin data filesize (per snapshot): 0.062976 MB
+04-11-2026 [13:27:46] Outputting atomic coordinate file to disk 0.251647 GB/s in 0.000375383 s
+04-11-2026 [13:27:46] Outputting configuration file 00000000 to disk 0.413242 GB/s in 0.000152395 s [ 0.000688165 s]
+04-11-2026 [13:27:46] Equilibration terminated, enabling laser ...
+04-11-2026 [13:27:46] Bits to be written: 3, in x,y: 3, 1
+04-11-2026 [13:27:46] Head position at beginning of track 1 : -2.4985 nm, 2.5 nm
+04-11-2026 [13:27:46] Head position at beginning of first bit in track 1 : 0.0035 nm, 2.5 nm
+04-11-2026 [13:27:46] Outputting configuration file 00000001 to disk 0.380566 GB/s in 0.00016548 s [ 0.000847098 s]
+04-11-2026 [13:27:47] Written bit 1 : bit 1 on track 1
+04-11-2026 [13:27:47] Head moving to position: 3.0035 nm, 2.5 nm
+04-11-2026 [13:27:47] Outputting configuration file 00000002 to disk 0.314073 GB/s in 0.000200514 s [ 0.00138017 s]
+04-11-2026 [13:27:48] Written bit 2 : bit 2 on track 1
+04-11-2026 [13:27:48] Head moving to position: 6.0035 nm, 2.5 nm
+04-11-2026 [13:27:48] Outputting configuration file 00000003 to disk 0.324645 GB/s in 0.000193984 s [ 0.000957017 s]
+04-11-2026 [13:27:48] Written bit 3 : bit 3 on track 1
+04-11-2026 [13:27:48] Head moving to position: 9.0035 nm, 2.5 nm
+04-11-2026 [13:27:48] Outputting configuration file 00000004 to disk 0.357404 GB/s in 0.000176204 s [ 0.000908428 s]
+04-11-2026 [13:27:49] Head position at end of track 1 : 11.504, 2.5 nm
+04-11-2026 [13:27:49] Disabling laser and external field and integrating system for extra 10 ps
+04-11-2026 [13:27:49] Outputting configuration file 00000005 to disk 0.284072 GB/s in 0.00022169 s [ 0.00122928 s]
+04-11-2026 [13:27:50] Outputting configuration file 00000006 to disk 0.312141 GB/s in 0.000201755 s [ 0.000962321 s]
+04-11-2026 [13:27:50] Outputting configuration file 00000007 to disk 0.468477 GB/s in 0.000134427 s [ 0.00129484 s]
+04-11-2026 [13:27:51] Outputting configuration file 00000008 to disk 0.525584 GB/s in 0.000119821 s [ 0.000883344 s]
+04-11-2026 [13:27:51] Outputting configuration file 00000009 to disk 0.601438 GB/s in 0.000104709 s [ 0.000820282 s]
+04-11-2026 [13:27:52] Outputting configuration file 00000010 to disk 0.623741 GB/s in 0.000100965 s [ 0.000737907 s]
+04-11-2026 [13:27:52] Simulation run time [s]: 6.18429
+04-11-2026 [13:27:52] Host memory after simulation: current 9.53516 MB (largest rank), 9.53516 MB (all ranks); peak 9.53516 MB (largest rank), 9.53516 MB (all ranks)
+04-11-2026 [13:27:52] Checkpoint file written to disk.
+04-11-2026 [13:27:52] Simulation ended gracefully.

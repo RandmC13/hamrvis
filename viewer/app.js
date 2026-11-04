@@ -110,7 +110,7 @@ const rgb = (L, i) => `rgb(${L[3 * i]},${L[3 * i + 1]},${L[3 * i + 2]})`;
 // ------------------------------------------------------------------------------------------------ loading
 async function loadStage(st) {
   if (D[st]) return D[st];
-  const e = S.M.stages[st], d = { e, st };
+  const e = S.M.byId[st], d = { e, st };
   d.nG = e.grains.id.length;
   if (e.grain_series) {
     const nF = e.grain_series.frames, nL = e.grain_series.lead.length;
@@ -120,8 +120,8 @@ async function loadStage(st) {
     d.time = Float64Array.from({ length: nF }, (_, f) => d.lead[f * nL]);
     d.steps = Float64Array.from(d.time, t => Math.round(t / e.dt));
   } else Object.assign(d, { nF: 1, time: [0], steps: [0] });
-  const out = await tryBuf(`${st}/output.f32`);
-  if (out) { d.out = new Float32Array(out); d.cols = e.output.columns; }
+  const f64 = e.output && e.output.dtype === "f64", out = await tryBuf(`${st}/output.${f64 ? "f64" : "f32"}`);
+  if (out) { d.out = f64 ? new Float64Array(out) : new Float32Array(out); d.cols = e.output.columns; }
   if (e.grain_map) d.gmap = new Int16Array(await getBuf(`${st}/grain_map.i16`));
   if (e.snapshots) {
     d.snaps = e.snapshots.frames.map(s => ({ ...s, step: Math.round(s.time / e.dt) }));
@@ -174,8 +174,9 @@ function minGrainM(d, g) {
 // written as intended at frame f: melted at some point in the run, and pointing along its bit's field now
 const okAt = (d, f, a, g) => a.intended !== 0 && Math.sign(gmz(d, f, g)) === a.intended;
 const melted = a => a.category !== "unheated" && a.intended !== 0;
+const refD = d => d.e.ref ? D[d.e.ref] : null;                    // the write before this run, if any
 const wantOf = (d, g) => {                                        // intended z direction of grain g (write analysis);
-  const an = d.an || (D.write && D.write.an);                     // 0 for grains the laser never melts
+  const an = d.an || (refD(d) && refD(d).an);                     // 0 for grains the laser never melts
   return an && an[g] && an[g].category !== "unheated" ? an[g].intended : 0;
 };
 function grainAt(x, y) {                                          // grain index at film position, from the atom map
@@ -192,7 +193,7 @@ function inPoly(o, x, y) {
 }
 const _edges = new Map();                                         // grain index -> its boundary pixels
 function grainEdge(d, g) {
-  const key = d.st + g;
+  const key = `${d.st}|${g}`;
   if (_edges.has(key)) return _edges.get(key);
   const M = d.e.grain_map, gm = d.gmap, px = [];
   for (let iy = 0; iy < M.ny; iy++) for (let ix = 0; ix < M.nx; ix++) {
@@ -292,9 +293,9 @@ function drawFilm(ctx, w, h) {
   ctx.setLineDash([5, 4]); ctx.lineWidth = 1; ctx.strokeStyle = css("--ink"); ctx.globalAlpha = .5;
   const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(w, yl); ctx.stroke();
   ctx.setLineDash([]); ctx.globalAlpha = 1;
-  if (S.cells && S.stage !== "relax") note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
+  if (S.cells && cellGeom(d)) note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
   if (d.model) drawHead(ctx, d, sx, sy, h);
-  if (S.stage === "read") drawReaderBand(ctx, w, h, sy);
+  if (e.dipole) drawReaderBand(ctx, w, h, sy);
   if (view !== "grains") {   // atom views show the nearest snapshot: say so on the image when it is not this time
     const s = nearestSnap(d, d.steps[S.f]);
     if (s && Math.abs(s.step - d.steps[S.f]) * e.dt > 1e-13) {
@@ -307,8 +308,8 @@ function drawFilm(ctx, w, h) {
   setNote("map", [note, `section y ${fmt(S.ysec)} nm`]);
 }
 // bit cells: each bit's region (shifted upstream by the freeze lag) on every track; the band hotter than Tc
-function cellGeom() {
-  const W = S.M.stages.write; if (!W || !W.hamr) return null;
+function cellGeom(d = cur()) {
+  const W = d.e.hamr ? d.e : d.e.ref && S.M.byId[d.e.ref]; if (!W || !W.hamr) return null;
   const p = W.hamr, lag = W.freeze_lag_nm || 0, Tc = W.Tc;
   const half = Tc > p.Tmin && Tc < p.Tmax ? p.sigma_y * Math.sqrt(2 * Math.log((p.Tmax - p.Tmin) / (Tc - p.Tmin))) : 0;
   return { p, lag, Tc, half };
@@ -318,7 +319,7 @@ function cellGeom() {
 const _cells = {};
 function cellParts(d) {
   if (_cells[d.st]) return _cells[d.st];
-  const C = cellGeom(), p = C.p, out = [], M = d.e.grain_map, e = d.e;
+  const C = cellGeom(d), p = C.p, out = [], M = d.e.grain_map, e = d.e;
   for (let t = 0; t < p.n_tracks; t++) for (let b = 0; b < p.bits_per_track; b++) {
     const yc = p.pad + (t + .5) * p.TW, hw = C.half || p.TW / 2, x0 = b * p.BL - C.lag, x1 = x0 + p.BL;
     const w = new Map();
@@ -447,8 +448,8 @@ function filmTip(x, y) {
     }
   }
   if (d.model) rows.push(["laser T now", `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], ["peak laser T", `${fmt(d.model.peakT(x, y), 0)} K`]);
-  if (S.cells && S.pol && S.stage !== "relax" && d.g && cellGeom()) {
-    const C = cellGeom(), p = C.p, t = Math.min(p.n_tracks - 1, Math.max(0, Math.floor((y - p.pad) / p.TW))), b = Math.floor((x + C.lag) / p.BL);
+  if (S.cells && S.pol && d.g && cellGeom(d)) {
+    const C = cellGeom(d), p = C.p, t = Math.min(p.n_tracks - 1, Math.max(0, Math.floor((y - p.pad) / p.TW))), b = Math.floor((x + C.lag) / p.BL);
     const c = b >= 0 && b < p.bits_per_track ? cellParts(d)[t * p.bits_per_track + b] : null;
     if (c) rows.push([`bit ${b + 1} mean m<sub>z</sub>`, `${fmt(cellMz(d, c, S.f), 3)} ${c.want ? (bitOk(d, c, S.f) ? "✓" : "✗") : ""}`]);
   }
@@ -605,8 +606,8 @@ function waveLane() {
       ctx.clearRect(0, 0, w, h);
       const y = v => h / 2 - v / lim * (h / 2 - 8);
       ctx.strokeStyle = css("--rule"); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(w, y(0)); ctx.stroke();
-      const wr = S.M.stages.write;
-      if (wr && wr.hamr) {
+      const wr = cellGeom(d) && (d.e.hamr ? d.e : S.M.byId[d.e.ref]);
+      if (wr) {
         const p = wr.hamr, lag = wr.freeze_lag_nm, t = trackOfSection(p);
         ctx.strokeStyle = css("--muted"); ctx.setLineDash([2, 3]);
         for (let b = 1; b < p.bits_per_track; b++) if (p.sequence[t * p.bits_per_track + b] !== p.sequence[t * p.bits_per_track + b - 1]) {
@@ -639,10 +640,10 @@ function buildLanes() {
   const d = cur();
   for (const id of ["lanes-top", "lanes-bottom"]) $(id).querySelectorAll(".lane").forEach(n => n.remove());
   LANES = []; S.tip = null;
-  if (S.stage === "write" && d.an) LANES.push(bitsLane());
-  LANES.push(filmLane(S.stage === "read" ? "Written" : "Film"));
+  if (d.e.hamr && d.an) LANES.push(bitsLane());
+  LANES.push(filmLane(d.e.type === "dipole-read" ? "Written" : "Film"));
   if (d.snaps && d.e.snapshots.volume) LANES.push(xzLane());
-  if (S.stage === "read" && d.e.dipole) LANES.push(sensorLane(), bxzLane(), waveLane());
+  if (d.e.dipole) LANES.push(sensorLane(), bxzLane(), waveLane());
   for (const L of LANES) {
     const el = document.createElement("div"); el.className = "lane"; el.id = "lane-" + L.id;
     el.innerHTML = `<div class="lane-head">${L.title}</div><canvas aria-label="${L.title.replace(/<[^>]+>/g, "")}"></canvas><div class="note" id="note-${L.id}"></div>`;
@@ -687,7 +688,7 @@ function drawAxis(id) {
   for (let x = 0; x <= L + 1e-9; x += step) { const px = X(x, w); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, 4); ctx.stroke(); ctx.fillText(x, Math.min(Math.max(px, 8), w - 12), 14); }
 }
 function timeText(d, t) {
-  if (d.st === "relax") return `MC step ${Math.round(t / d.e.dt).toLocaleString()}`;
+  if (d.e.monte_carlo) return `MC step ${Math.round(t / d.e.dt).toLocaleString()}`;
   return t < 1e-9 ? `${fmt(t * 1e12, 0)} ps` : `${fmt(t * 1e9, 3)} ns`;
 }
 function drawClock() {
@@ -752,7 +753,7 @@ function stRows(d) {
 }
 function drawSt() {
   const d = cur(), sec = $("st-panel");
-  sec.hidden = !(d.g && d.nF > 1 && S.stage === "write");
+  sec.hidden = !(d.g && d.nF > 1 && d.e.hamr);
   if (sec.hidden) return;
   const c = $("st"), rows = stRows(d), left = 44, top = 16, bot = 20;
   const rowH = Math.min(8, 520 / rows.length), H = top + bot + rowH * rows.length;
@@ -829,10 +830,10 @@ function drawInspector() {
   if (d.g && d.nF > 1) drawStory(d, g, a);
   const cb = $("story-all"); if (cb) cb.onchange = () => { S.storyAll = cb.checked; redraw(); };
 }
-const stageTitle = st => ({ relax: "Relaxation", write: "Write", read: "Read-back" })[st];
+const stageTitle = st => S.M.byId[st].title;
 function stageFacts(st) {
   const d = D[st], e = d.e;
-  if (st === "write" && e.analysis) {
+  if (e.hamr && e.analysis) {
     const an = e.analysis.grains, heated = an.filter(melted), ok = heated.filter(a => a.correct).length;
     let now = 0; an.forEach((a, g) => { if (melted(a) && okAt(d, S.f, a, g)) now++; });
     return [[`✓ at ${timeText(d, d.time[S.f])}`, `${now} / ${heated.length} (${fmt(100 * now / heated.length, 0)} %)`],
@@ -843,11 +844,15 @@ function stageFacts(st) {
       ["freeze lag", `${fmt(e.freeze_lag_nm)} nm`], ["peak head field", `${fmt(e.hamr.Hpeak, 2)} T`], ["head speed", `${fmt(e.hamr.v, 0)} m/s`],
       ["bits", e.hamr.bits_per_track * e.hamr.n_tracks], ["bit length", `${fmt(e.hamr.BL)} nm`], ["laser T", `${fmt(e.hamr.Tmin, 0)}–${fmt(e.hamr.Tmax, 0)} K`]];
   }
-  if (st === "relax") return [["integrator", e.input["sim:integrator"]], ["temperature", `${e.input["sim:temperature"] || "–"} K`],
+  if (e.type === "monte-carlo") return [["integrator", e.input["sim:integrator"]], ["temperature", `${e.input["sim:temperature"] || "–"} K`],
     ["steps", d.nF > 1 ? Math.round(d.time[d.nF - 1] / e.dt).toLocaleString() : "–"], ["grains", d.nG]];
-  const bits = d.g && cellGeom() ? cellParts(d).filter(c => c.want && c.parts.length) : [];
-  return [bits.length && ["bits ✓ (written state)", `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
-    ["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
+  const bits = d.g && cellGeom(d) ? cellParts(d).filter(c => c.want && c.parts.length) : [];
+  const generic = e.type !== "dipole-read" && e.type !== "hamr";   // a kind of run with no specific views yet
+  return [generic && ["program", e.input["sim:program"] || "–"], generic && ["integrator", e.input["sim:integrator"] || "–"],
+    generic && ["temperature", `${e.input["sim:temperature"] || "–"} K`], generic && d.nF > 1 && ["steps", Math.round(d.time[d.nF - 1] / e.dt).toLocaleString()],
+    generic && ["grains", d.nG], e.ref && !e.v1 && ["compared with", `${S.M.byId[e.ref].title} (${e.ref})`],
+    bits.length && ["bits ✓ (written state)", `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
+    (e.dipole || !generic) && ["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
     e.dipole && ["cell size", `${e.dipole.cell_nm} nm`]];
 }
 function legendHtml() {
@@ -897,7 +902,7 @@ function drawStory(d, g, a) {
 // ------------------------------------------------------------------------------------------------ sections
 function drawAnalysis() {
   const sec = $("analysis"), d = cur(), e = d.e;
-  if (S.stage !== "write" || !e.analysis) { sec.hidden = true; return; }
+  if (!e.analysis) { sec.hidden = true; return; }
   sec.hidden = false;
   const an = e.analysis.grains, heated = an.filter(a => a.intended && a.category !== "unheated"), ok = heated.filter(a => a.correct).length;
   const cats = {}; an.forEach(a => { const k = a.category; cats[k] = cats[k] || { n: 0, ok: 0 }; cats[k].n++; if (a.correct) cats[k].ok++; });
@@ -933,10 +938,10 @@ function drawScatter(d, an) {
   for (let v = -Math.floor(ymax / 10) * 10; v <= ymax; v += 10) { el("line", { x1: L, x2: w - R, y1: sy(v), y2: sy(v), stroke: css("--rule") }); el("text", { x: L - 6, y: sy(v) + 4, "text-anchor": "end", fill: css("--muted"), "font-size": 11 }, v); }
   el("text", { x: (L + w - R) / 2, y: h - 4, "text-anchor": "middle", fill: css("--muted"), "font-size": 11.5 }, "behind laser centre (nm)");
   el("text", { x: 12, y: (T + h - B) / 2, "text-anchor": "middle", fill: css("--muted"), "font-size": 11.5, transform: `rotate(-90 12 ${(T + h - B) / 2})` }, "off track centre (nm)");
-  const k = 2 * Math.log((p.Tmax - p.Tmin) / (e.Tc - p.Tmin));
+  const k = e.Tc > p.Tmin && e.Tc < p.Tmax ? 2 * Math.log((p.Tmax - p.Tmin) / (e.Tc - p.Tmin)) : -1;   // no isotherm without a Tc
   let dd = "";
-  for (let i = 0; i <= 120; i++) { const yy = -p.sigma_y * Math.sqrt(k) + i / 120 * 2 * p.sigma_y * Math.sqrt(k), r = k - yy * yy / p.sigma_y ** 2; if (r < 0 || Math.abs(yy) > ymax) continue; dd += (dd ? "L" : "M") + sx(p.sigma_x * Math.sqrt(r)) + " " + sy(yy); }
-  el("path", { d: dd, fill: "none", stroke: css("--ink"), "stroke-width": 1.3, "stroke-dasharray": "5 3" });
+  for (let i = 0; i <= 120; i++) { const yy = -p.sigma_y * Math.sqrt(k) + i / 120 * 2 * p.sigma_y * Math.sqrt(k), r = k - yy * yy / p.sigma_y ** 2; if (!(r >= 0) || Math.abs(yy) > ymax) continue; dd += (dd ? "L" : "M") + sx(p.sigma_x * Math.sqrt(r)) + " " + sy(yy); }
+  if (dd) el("path", { d: dd, fill: "none", stroke: css("--ink"), "stroke-width": 1.3, "stroke-dasharray": "5 3" });
   for (const a of pts) {
     const c = el("circle", { cx: sx(a.lag_dec), cy: sy(a.dy), r: 3.6, fill: css(a.correct ? "--ok" : "--bad"), "fill-opacity": .85, stroke: css("--lane"), "stroke-width": .8 });
     const g = an.indexOf(a);
@@ -949,7 +954,9 @@ function drawScatter(d, an) {
 function drawDetails() {
   const e = cur().e, sec = $("details"), ck = e.checks;
   const facts = [["source", e.source], ["reduced", S.M.created]];
-  if (e.grain_map) facts.push(["grain shapes", `from atom coordinates${e.grain_map.from_stage ? ` (${e.grain_map.from_stage} stage)` : ""}, ${e.grain_map.mixed_columns} mixed columns`]);
+  const from = e.grain_map && (e.grain_map.from_run || e.grain_map.from_stage);
+  if (e.segments && e.segments.length > 1) facts.splice(1, 0, ["continued in", e.segments.slice(1).join(", ")]);
+  if (e.grain_map) facts.push(["grain shapes", `from atom coordinates${from ? ` (${from} ${e.grain_map.from_run ? "run" : "stage"})` : ""}, ${e.grain_map.mixed_columns} mixed columns`]);
   if (ck) {
     facts.push(["stored columns vs exact", `≤ ${fmt(ck.column_rounding_max, 4)}`]);
     if (ck.grain_txt_same_step && ck.grain_txt_same_step.n) facts.push(["grain.txt, same step", `${ck.grain_txt_same_step.n} snapshots, max diff ${ck.grain_txt_same_step.max_diff.toExponential(1)}`]);
@@ -976,18 +983,18 @@ function syncControls() {
     $(id).setAttribute("aria-pressed", S.view === v);
     $(id).disabled = v !== "grains" && !(d.snaps && (v === "atoms" || d.e.snapshots.volume));
   }
-  const hasAn = !!(d.an || (D.write && D.write.an));
+  const hasAn = !!(d.an || (refD(d) && refD(d).an));
   for (const [id, v] of [["c-mz", "mz"], ["c-agree", "agree"], ["c-peak", "peak"], ["c-minm", "minm"]]) {
     $(id).setAttribute("aria-pressed", S.colour === v);
-    $(id).hidden = v === "agree" && S.stage === "relax";   // nothing written yet
+    $(id).hidden = v === "agree" && !cellGeom(d);   // nothing written yet
     $(id).disabled = (v === "peak" && !d.model) || (v === "minm" && !(d.g || d.snaps)) || (v === "agree" && !hasAn);
   }
   $("layer-ctl").hidden = S.view !== "layer" || !d.snaps;
   if (d.grid) { $("layer").max = d.grid.nz - 1; $("layer-out").textContent = `z ${fmt((S.layer + .5) * d.grid.pitch_z_nm, 2)} nm`; }
-  $("z-ctl").hidden = $("w-ctl").hidden = S.stage !== "read" || !d.e.dipole;
+  $("z-ctl").hidden = $("w-ctl").hidden = !d.e.dipole;
   if (d.e.dipole) { $("zsel").max = d.e.dipole.nz - 2; $("zsel").value = S.z; $("z-out").textContent = zText(S.z); $("w-out").textContent = `${S.rw} nm`; }
   $("st-all").checked = S.stAll;
-  $("cells-ctl").hidden = !(S.M.stages.write && S.M.stages.write.hamr) || S.stage === "relax";   // nothing written yet
+  $("cells-ctl").hidden = !cellGeom(d);   // nothing written yet
   $("pol-ctl").hidden = $("cells-ctl").hidden || !S.cells || !d.g;
 }
 function bindControls() {
@@ -1071,53 +1078,70 @@ function savePng() {
 // ------------------------------------------------------------------------------------------------ stages
 async function setStage(st) {
   S.stage = st; S.sel = -1; S.hov = -1; _st = null;
-  const d = await loadStage(st);
-  if (st !== "write" && S.M.stages.write && S.M.stages.write.analysis) await loadStage("write");   // intended bits for "vs intended"
-  S.f = S.fa = st === "write" ? 0 : d.nF - 1;
-  const e = d.e;
-  S.ysec = e.hamr ? e.hamr.TW * .5 + e.hamr.pad : e.size_nm[1] / 2;
-  if (st === "read" && S.M.stages.write && S.M.stages.write.hamr) { const p = S.M.stages.write.hamr; S.ysec = p.TW * .5 + p.pad; }
+  const d = await loadStage(st), e = d.e;
+  if (e.ref) await loadStage(e.ref);                               // intended bits for "vs intended"
+  S.f = S.fa = e.hamr ? 0 : d.nF - 1;
+  const C = cellGeom(d);
+  S.ysec = C ? C.p.TW * .5 + C.p.pad : e.size_nm[1] / 2;
   if (e.dipole) S.z = Math.min(e.dipole.nz - 2, Math.round(e.size_nm[2] * .55 / e.dipole.cell_nm));
   if (S.view !== "grains" && !d.snaps) S.view = "grains";
-  if ((S.colour === "peak" && !d.model) || (S.colour === "agree" && st === "relax")) S.colour = "mz";
+  if ((S.colour === "peak" && !d.model) || (S.colour === "agree" && !C)) S.colour = "mz";
   document.querySelectorAll("#chain button").forEach(b => b.setAttribute("aria-pressed", b.dataset.stage === st));
   try { history.replaceState(null, "", "#" + st); } catch (err) { /* sandboxed */ }
   buildLanes(); syncControls(); drawAnalysis(); drawDetails(); redraw();
 }
+// one tab per run, in run order; the line under the title says what the run is
+function runSub(e) {
+  const T = e.input["sim:temperature"];
+  if (e.hamr) return `${e.hamr.bits_per_track * e.hamr.n_tracks} bits, ${fmt(e.hamr.v, 0)} m/s`;
+  if (e.type === "monte-carlo") return `${e.input["sim:integrator"] || "relax"}, ${T || ""} K`;
+  if (e.dipole) return "dipole field";
+  return e.v1 ? "1 step" : [e.input["sim:integrator"], T && `${T} K`].filter(Boolean).join(", ");
+}
 function buildChain() {
   const nav = $("chain");
   nav.innerHTML = "";
-  for (const st of ["relax", "write", "read"]) {
-    const e = S.M.stages[st], b = document.createElement("button");
-    b.dataset.stage = st; b.disabled = !e;
-    let sub = "not in bundle";
-    if (e) sub = st === "write" && e.hamr ? `${e.hamr.bits_per_track * e.hamr.n_tracks} bits, ${fmt(e.hamr.v, 0)} m/s`
-      : st === "relax" ? `${e.input["sim:integrator"] || "relax"}, ${e.input["sim:temperature"] || ""} K` : e.dipole ? "dipole field" : "1 step";
-    b.innerHTML = `<b>${stageTitle(st)}</b><span>${sub}</span>`;
-    b.onclick = () => setStage(st);
+  for (const e of S.M.runs) {
+    const b = document.createElement("button");
+    b.dataset.stage = e.id;
+    b.innerHTML = `<b>${e.title}</b><span>${e.v1 ? "" : e.id + " · "}${runSub(e)}</span>`;
+    b.title = e.segments ? e.segments.join("\n") : e.source;
+    b.onclick = () => setStage(e.id);
     nav.appendChild(b);
   }
+}
+// version 1 bundles had three fixed stages; give them the run list of version 2
+function normalise(M) {
+  if (!M.runs) {
+    const T = { relax: "Relaxation", write: "Write", read: "Read-back" };
+    M.runs = ["relax", "write", "read"].filter(s => M.stages[s]).map(s => Object.assign(M.stages[s], {
+      id: s, title: T[s], v1: true, monte_carlo: s === "relax" && /monte-carlo/.test(M.stages[s].input["sim:integrator"] || ""),
+      type: s === "write" ? "hamr" : s === "read" ? "dipole-read" : /monte-carlo/.test(M.stages[s].input["sim:integrator"] || "") ? "monte-carlo" : "generic",
+      ref: s === "read" && M.stages.write ? "write" : undefined }));
+  }
+  M.byId = Object.fromEntries(M.runs.map(e => [e.id, e]));
+  return M;
 }
 
 async function main() {
   try { const t = localStorage.getItem("hamrvis-theme"); if (t && !EMB) document.documentElement.dataset.theme = t; } catch (e) { /* storage unavailable */ }
   buildLuts(); bindControls();
   try {
-    S.M = JSON.parse(new TextDecoder().decode(await getBuf("manifest.json")));
+    S.M = normalise(JSON.parse(new TextDecoder().decode(await getBuf("manifest.json"))));
   } catch (err) {
     $("run-sub").textContent = "";
     document.querySelector(".work").innerHTML = `<div class="error"><h2>No bundle</h2>${kv([["error", err.message], ["start with", "python3 -m hamrvis view &lt;bundle&gt;"]])}</div>`;
     return;
   }
-  const st = S.M.stages, any = st.write || st.relax || st.read;
+  const runs = S.M.runs, any = runs.find(e => e.hamr) || runs[0];
   $("run-name").textContent = S.M.name;
-  const nat = (st.write || st.relax || {}).n_atoms;
+  const nat = (runs.find(e => e.hamr && e.n_atoms) || runs.find(e => e.n_atoms) || {}).n_atoms;
   $("run-sub").textContent = [nat ? `${nat.toLocaleString()} atoms` : null, `${any.grains.id.length} grains`,
     `${any.size_nm.map(v => fmt(v, 0)).join(" × ")} nm`].filter(Boolean).join(", ");
   document.title = `${S.M.name} HAMR run`;
   buildChain();
   const want = location.hash.slice(1);
-  await setStage(st[want] ? want : st.write ? "write" : st.relax ? "relax" : "read");
-  window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (st[h] && h !== S.stage) setStage(h); });
+  await setStage(S.M.byId[want] ? want : any.id);
+  window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (S.M.byId[h] && h !== S.stage) setStage(h); });
 }
 main();

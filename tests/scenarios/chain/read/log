@@ -1,0 +1,101 @@
+04-11-2026 [13:27:33] Logfile opened
+04-11-2026 [13:27:33] Executable : vampire-serial
+04-11-2026 [13:27:33] Host name  : localhost:
+04-11-2026 [13:27:33] Directory  : /path/to/hamrvis/tests/runs/chain/read
+04-11-2026 [13:27:33] Process ID : 49933
+04-11-2026 [13:27:33] Version    : 7.0.0
+04-11-2026 [13:27:33] Githash    : 
+04-11-2026 [13:27:33] Opening main input file "input".
+04-11-2026 [13:27:33]    Loading text file input on root process
+04-11-2026 [13:27:33]    File successfully loaded on root process with 984 characters and size 0.000984 [ 9.88676 ] MB/s
+04-11-2026 [13:27:33] Parsing system parameters from main input file.
+04-11-2026 [13:27:33] Opening material file "m.mat".
+04-11-2026 [13:27:33]    Loading text file m.mat on root process
+04-11-2026 [13:27:33]    File successfully loaded on root process with 366 characters and size 0.000366 [ 3.01856 ] MB/s
+04-11-2026 [13:27:33] Parsing material file for parameters.
+04-11-2026 [13:27:33] Setting periodic boundary conditions in x,y directions
+04-11-2026 [13:27:33] Generating neighbour interactions for a lattice of 5 x 5 x 5 unit cells for neighbour calculation
+04-11-2026 [13:27:33] Granular film: requested mean diameter = 3 nm
+  Placed 9 grains, 0 vanished during weight fitting.
+  Measured mean equivalent diameter: primary = 3.00999 nm (sd 1.06106 nm)
+  Warning: grain seed packing did not fully relax (jammed with max overlap fraction 0.198445 after 800 iterations).
+  Warning: grain weight fitting did not fully converge (achieved tolerance 0.307464 after 500 iterations).
+04-11-2026 [13:27:33] Generating Voronoi Grains.........done!
+04-11-2026 [13:27:33] Calculating alloy properties of system
+04-11-2026 [13:27:33] Removed 0 non-magnetic atoms from system
+04-11-2026 [13:27:33] Determining atomic composition:
+04-11-2026 [13:27:33] Material 1 FePt makes up 100 % of all atoms ( 2624 atoms )
+04-11-2026 [13:27:33] Material 2 fill makes up 0 % of all atoms ( 0 atoms )
+04-11-2026 [13:27:33] Memory required for neighbourlist calculation:0.0256 MB
+04-11-2026 [13:27:33] Allocating memory for supercell array in neighbourlist calculation
+04-11-2026 [13:27:33] 	Allocating memory done
+04-11-2026 [13:27:33] Populating supercell array for neighbourlist calculation...
+04-11-2026 [13:27:33] 	Populating supercell array completed
+04-11-2026 [13:27:33] Memory required for neighbour list:0.1536 MB
+04-11-2026 [13:27:33] Generating neighbour list...
+04-11-2026 [13:27:33] 	Neighbour list calculation complete
+04-11-2026 [13:27:33] Deallocating supercell array for neighbour list calculation
+04-11-2026 [13:27:33] 	Supercell array deallocated
+04-11-2026 [13:27:33] Copying system data to optimised data structures.
+04-11-2026 [13:27:33] Number of atoms generated on rank 0: 2624
+04-11-2026 [13:27:33] Memory required for copying to performance array on rank 0: 0.398848 MB RAM
+04-11-2026 [13:27:33] Identifying surface atoms using global threshold value of 6
+04-11-2026 [13:27:33] 1752 surface atoms found.
+04-11-2026 [13:27:33] Memory required for creation of 1D neighbour list on rank 0: 0.041984 MB RAM
+04-11-2026 [13:27:33] Initialising data structures for exchange calculation.
+04-11-2026 [13:27:33] Unrolled exchange template requires 0.104576MB RAM
+04-11-2026 [13:27:33] Generated 9 grains
+04-11-2026 [13:27:33] Number of atoms generated: 2624
+04-11-2026 [13:27:33] Host memory after system creation: current 8.65234 MB (largest rank), 8.65234 MB (all ranks); peak 8.85938 MB (largest rank), 8.85938 MB (all ranks)
+04-11-2026 [13:27:33] Initializing vampire modules
+04-11-2026 [13:27:33] Macrocell size = 10,10,10 Angstroms
+04-11-2026 [13:27:33] Macrocells in x,y,z: 13	7	2
+04-11-2026 [13:27:33] Total number of macrocells: 182
+04-11-2026 [13:27:33] Memory required for macrocell arrays: 0.01456 MB
+04-11-2026 [13:27:33] Calculated (magnetic) atomic volume: 27 cubic Angstroms
+04-11-2026 [13:27:33] Number of local macrocells on rank 0: 72
+04-11-2026 [13:27:33] Initialising data structures for anisotropy calculation for 2 materials
+04-11-2026 [13:27:33] Initialising statistics module
+04-11-2026 [13:27:33] Flag:checkpoint_loaded_flag = 1
+04-11-2026 [13:27:33] Checkpoint file loaded at sim::time 0.
+04-11-2026 [13:27:33] Initialising dipole field calculation using macrocell solver
+04-11-2026 [13:27:33] 	Dipole field calculation requires 0.628992 MB of RAM
+04-11-2026 [13:27:33] Precalculating rij matrix for dipole calculation using macrocell solver... 
+04-11-2026 [13:27:33] Precalculation of rij matrix for dipole calculation complete. Time taken: 0.000109092 s
+04-11-2026 [13:27:33] DIPOLE_SCALING BUILD solver=macrocell nprocs=1 cells=182 atoms=2624 build_time_s=0.000987022 mem_total_kb=0 mem_max_rank_kb=0
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=0 update_time_s=0.00798809
+04-11-2026 [13:27:33] Time required for dipole update: 0.00808806 s.
+04-11-2026 [13:27:33] Outputting dipole matrix 
+04-11-2026 [13:27:33] Demagnetisation tensor in format Nxx   Nxy   Nxz   Nyx   Nyy   Nyz   Nzx   Nzy   Nzz :
+04-11-2026 [13:27:33] 0.054015	-0.00109419	-1.05679e-17	-0.00109419	0.121588	-6.15067e-18	-1.05679e-17	-6.15067e-18	0.824397
+04-11-2026 [13:27:33] Starting Simulation with Program Time-Series...
+04-11-2026 [13:27:33] Initialising configuration output... done!
+04-11-2026 [13:27:33] Total coordinate data filesize: 0.094464 MB
+04-11-2026 [13:27:33] Total spin data filesize (per snapshot): 0.062976 MB
+04-11-2026 [13:27:33] Outputting atomic coordinate file to disk 0.260988 GB/s in 0.000361948 s
+04-11-2026 [13:27:33] Outputting configuration file 00000000 to disk 0.428332 GB/s in 0.000147026 s [ 0.000646508 s]
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=100 update_time_s=0.000329005
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=200 update_time_s=0.000335002
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=300 update_time_s=0.000468765
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=400 update_time_s=0.000318318
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=500 update_time_s=0.000292954
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=600 update_time_s=0.000282236
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=700 update_time_s=0.000309895
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=800 update_time_s=0.000327103
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=900 update_time_s=0.000215392
+04-11-2026 [13:27:33] Outputting dipole fields to file
+04-11-2026 [13:27:33] DIPOLE_SCALING UPDATE solver=macrocell nprocs=1 sim_time=1000 update_time_s=0.000400237
+04-11-2026 [13:27:33] Outputting configuration file 00000001 to disk 0.358883 GB/s in 0.000175478 s [ 0.000983008 s]
+04-11-2026 [13:27:33] Simulation run time [s]: 0.26575
+04-11-2026 [13:27:33] Host memory after simulation: current 9.9375 MB (largest rank), 9.9375 MB (all ranks); peak 9.9375 MB (largest rank), 9.9375 MB (all ranks)
+04-11-2026 [13:27:33] Simulation ended gracefully.

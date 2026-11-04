@@ -4,6 +4,8 @@ fixture-run/ is a tiny granular HAMR write made by VAMPIRE (3 bits, 2624 atoms, 
 B_applied); regenerate it with tests/make_fixture.sh if the formats change. fixture-leadin/ is the same film with a
 lead-in (half a bit + NPS) longer than a bit and two tracks, made by VAMPIRE before its bit loop was fixed: it reports
 6 bits but writes 4 (see its log). fixture-leadin-fixed is the same input run by the fixed VAMPIRE: all 6 bits.
+scenarios/ holds folders of chained runs (MC relax, writes, reads, a write split over two jobs, ...) made by
+tests/make_scenarios.py; the tests reduce each folder as a whole.
 """
 import gzip
 import json
@@ -17,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hamrvis import export, reduce, vampire as vp
+from hamrvis import export, reduce, runs, vampire as vp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = os.path.join(HERE, "fixture-run")
@@ -25,6 +27,7 @@ LEADIN = os.path.join(HERE, "fixture-leadin")
 LEADIN_FIXED = os.path.join(HERE, "fixture-leadin-fixed")
 RUN_T0 = os.path.join(HERE, "fixture-t0")    # 0 K time series: snapshot and grain.txt share step 0
 APP = os.path.join(HERE, "..", "viewer", "app.js")
+SCEN = os.path.join(HERE, "scenarios")
 
 
 class FieldModel(unittest.TestCase):
@@ -147,14 +150,13 @@ class WindowSnapshots(unittest.TestCase):
             out[name] = os.path.join(self.tmp, "bundle-" + name)
             reduce.reduce([run], out[name], workers=2)
         compared = 0
-        for dp, _, files in os.walk(out["full"]):
+        full, window = os.path.join(out["full"], "full"), os.path.join(out["window"], "window")   # run folders
+        for dp, _, files in os.walk(full):
             for f in files:
-                if f == "manifest.json":
-                    continue
                 a = os.path.join(dp, f)
-                b = os.path.join(out["window"], os.path.relpath(a, out["full"]))
+                b = os.path.join(window, os.path.relpath(a, full))
                 read = (lambda p: gzip.decompress(Path(p).read_bytes())) if f.endswith(".gz") else (lambda p: Path(p).read_bytes())
-                self.assertEqual(read(a), read(b), msg=os.path.relpath(a, out["full"]))
+                self.assertEqual(read(a), read(b), msg=os.path.relpath(a, full))
                 compared += 1
         self.assertGreater(compared, 10)
 
@@ -172,7 +174,7 @@ class Reduce(unittest.TestCase):
         shutil.rmtree(cls.tmp)
 
     def test_manifest(self):
-        e = self.man["stages"]["write"]
+        e = self.man["runs"][0]
         self.assertEqual(len(e["snapshots"]["frames"]), len(vp.snapshots(RUN)))
         self.assertEqual(len(e["grains"]["id"]), 9)
         self.assertEqual(e["hamr"]["bits_per_track"], 3)
@@ -180,9 +182,9 @@ class Reduce(unittest.TestCase):
 
     def test_grain_map_matches_atoms(self):
         # every column of the map holds the grain of its magnetic atoms
-        e = self.man["stages"]["write"]
+        e = self.man["runs"][0]
         M = e["grain_map"]
-        gm = np.fromfile(os.path.join(self.bundle, "write", "grain_map.i16"), np.int16).reshape(M["ny"], M["nx"])
+        gm = np.fromfile(os.path.join(self.bundle, "fixture-run", "grain_map.i16"), np.int16).reshape(M["ny"], M["nx"])
         typ, xyz, g = vp.read_coords(vp.coord_files(RUN)[0])
         mag = np.isin(typ, e["magnetic_types"])
         ix = np.rint(xyz[mag, 0] / (M["pitch_nm"] * 10)).astype(int) % M["nx"]
@@ -194,22 +196,22 @@ class Reduce(unittest.TestCase):
 
     def test_snapshots_match_grain_txt(self):
         # one step apart (snapshots are written one step after the grain row): small but non-zero differences
-        c = self.man["stages"]["write"]["checks"]
+        c = self.man["runs"][0]["checks"]
         self.assertEqual(c["grain_txt_one_step_earlier"]["n"], len(vp.snapshots(RUN)) - 2)
         self.assertLess(c["column_rounding_max"], 0.5 / 127 + 1e-6)
 
     def test_snapshot_reading_exact_at_same_step(self):
         with tempfile.TemporaryDirectory() as d:
             reduce.reduce([RUN_T0], os.path.join(d, "b"), workers=1)
-            c = json.load(open(os.path.join(d, "b", "manifest.json")))["stages"]["relax"]["checks"]
+            c = json.load(open(os.path.join(d, "b", "manifest.json")))["runs"][0]["checks"]
         self.assertGreaterEqual(c["grain_txt_same_step"]["n"], 1)
         self.assertLess(c["grain_txt_same_step"]["max_diff"], 1e-5)   # grain.txt prints 6 significant digits
 
     def test_column_average_matches_spins(self):
-        e = self.man["stages"]["write"]
+        e = self.man["runs"][0]
         G = e["snapshots"]["grid"]
         idx, _, files, _ = vp.snapshots(RUN)[-1]
-        q = np.frombuffer(gzip.open(os.path.join(self.bundle, "write", "top", f"{idx:08d}.i8.gz")).read(), np.int8)
+        q = np.frombuffer(gzip.open(os.path.join(self.bundle, "fixture-run", "top", f"{idx:08d}.i8.gz")).read(), np.int8)
         q = q.reshape(3, G["ny"], G["nx"])
         typ, xyz, _ = vp.read_coords(vp.coord_files(RUN)[0])
         s = vp.read_spins(files[0])
@@ -225,7 +227,7 @@ class Reduce(unittest.TestCase):
         self.assertTrue((q[2][~filled] == -128).all())
 
     def test_analysis(self):
-        a = self.man["stages"]["write"]["analysis"]["grains"]
+        a = self.man["runs"][0]["analysis"]["grains"]
         self.assertEqual(len(a), 9)
         cats = {g["category"] for g in a}
         self.assertTrue(cats <= {"full-field", "reversal", "zero-field", "unheated", "undecided"})
@@ -238,7 +240,7 @@ class Reduce(unittest.TestCase):
             os.symlink(RUN, os.path.join(d, "write"))
             os.makedirs(os.path.join(d, "src"))
             shutil.copy(os.path.join(RUN, "input"), os.path.join(d, "src"))     # an input copy that never ran
-            self.assertEqual([os.path.basename(r) for r in reduce.find_runs([d])], ["write"])
+            self.assertEqual([os.path.basename(r) for r in runs.candidates([d])], ["write"])
 
     def test_export(self):
         out = os.path.join(self.tmp, "page.html")
@@ -266,6 +268,113 @@ class Reduce(unittest.TestCase):
             np.testing.assert_array_equal(res[:, 2].astype(bool), on)
             np.testing.assert_allclose(res[:, 3], h.field(steps), atol=1e-12)
             np.testing.assert_allclose(res[:, 4], h.temperature(4.0, 2.5, np.array(steps)), atol=1e-9)
+
+
+class RunDiscovery(unittest.TestCase):
+    """Runs are found, ordered and typed from their own files, whatever mix a folder holds."""
+
+    def found(self, name):
+        return [(r.id, r.type, [os.path.basename(d) for d in r.dirs]) for r in runs.find([os.path.join(SCEN, name)])]
+
+    def test_types_and_order(self):
+        self.assertEqual(self.found("chain"), [("relax", "monte-carlo", ["relax"]), ("write", "hamr", ["write"]),
+                                               ("read", "dipole-read", ["read"])])
+        self.assertEqual(self.found("write-only"), [("write", "hamr", ["write"])])
+        self.assertEqual([t for _, t, _ in self.found("rewrite")], ["hamr", "dipole-read", "hamr", "dipole-read"])
+        self.assertEqual(self.found("llg-relax"), [("anneal", "generic", ["anneal"]), ("write", "hamr", ["write"])])
+
+    def test_continued_jobs_are_one_run(self):
+        self.assertEqual(self.found("split-write"), [("job1", "hamr", ["job1", "job2"])])
+
+    def test_order_follows_the_logs_not_the_names(self):
+        # names sort as read, relax, write; the logs say relax ran first
+        self.assertEqual([i for i, _, _ in self.found("chain")], ["relax", "write", "read"])
+        order = [r.id for r in runs.find([os.path.join(SCEN, "chain")], order=["read", "write"])]
+        self.assertEqual(order, ["read", "write", "relax"])
+
+    def test_resumed_log_counts_bits_once(self):
+        # the second job replays its loop and logs bits 1-3 again
+        d = [os.path.join(SCEN, "split-write", j) for j in ("job1", "job2")]
+        self.assertEqual(vp.Hamr(d[0], d).written, 3)
+
+
+class Bundles(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.man = {}
+        for name in ("chain", "write-only", "split-write", "rewrite", "llg-relax"):
+            reduce.reduce([os.path.join(SCEN, name)], os.path.join(cls.tmp, name), workers=1)
+            cls.man[name] = json.load(open(os.path.join(cls.tmp, name, "manifest.json")))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def test_joined_jobs_equal_one_job(self):
+        # the same write run uninterrupted and as two jobs (the first killed mid-write, the second continued from
+        # its checkpoint, overlapping it) gives the same bundle, byte for byte
+        a, b = os.path.join(self.tmp, "write-only", "write"), os.path.join(self.tmp, "split-write", "job1")
+        compared = 0
+        for dp, _, files in os.walk(a):
+            for f in files:
+                p = os.path.join(dp, f)
+                q = os.path.join(b, os.path.relpath(p, a))
+                read = (lambda x: gzip.decompress(Path(x).read_bytes())) if f.endswith(".gz") else (lambda x: Path(x).read_bytes())
+                self.assertEqual(read(p), read(q), msg=os.path.relpath(p, a))
+                compared += 1
+        self.assertGreater(compared, 20)
+        ea, eb = self.man["write-only"]["runs"][0], self.man["split-write"]["runs"][0]
+        for k in ("hamr", "analysis", "Tc", "output", "grain_series", "snapshots"):
+            self.assertEqual(ea[k], eb[k], msg=k)
+        self.assertEqual(len(eb["segments"]), 2)
+
+    def test_reads_compare_with_the_write_before_them(self):
+        r = self.man["rewrite"]["runs"]
+        self.assertEqual([e.get("ref") for e in r], [None, "1-write", None, "3-rewrite"])
+        self.assertNotIn("ref", self.man["chain"]["runs"][0])     # the relax comes before any write
+        self.assertTrue(all("dipole" in e for e in r if e["type"] == "dipole-read"))
+
+    def test_time_axis(self):
+        self.assertEqual([e["monte_carlo"] for e in self.man["chain"]["runs"]], [True, False, False])
+
+    def test_freezing_temperature_above_laser_minimum(self):
+        # decisions far from the laser (thermal flips of small grains) used to pull the estimate to Tmin
+        e = self.man["chain"]["runs"][1]
+        self.assertGreater(e["Tc"], e["hamr"]["Tmin"] + 50)
+
+    def test_reduce_again_replaces_the_bundle(self):
+        out = os.path.join(self.tmp, "again")
+        reduce.reduce([os.path.join(SCEN, "rewrite")], out, workers=1)
+        reduce.reduce([os.path.join(SCEN, "write-only")], out, workers=1)
+        self.assertEqual(sorted(os.listdir(out)), ["manifest.json", "write"])
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "notes.txt"), "w").write("not a bundle")
+            with self.assertRaises(SystemExit):
+                reduce.reduce([os.path.join(SCEN, "write-only")], d, workers=1)
+            self.assertTrue(os.path.exists(os.path.join(d, "notes.txt")))
+
+    def test_export_takes_every_run(self):
+        out = os.path.join(self.tmp, "rewrite.html")
+        export.export(os.path.join(self.tmp, "rewrite"), out)
+        html = open(out).read()
+        for rid in ("1-write", "2-read", "3-rewrite", "4-read"):
+            self.assertIn(f'"{rid}/output.f64"', html)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_viewer_reads_version_1_manifests(self):
+        # bundles reduced before the run list keep their three tabs, titles and links (#relax, #write, #read)
+        src = open(APP).read()
+        fn = src[src.index("function normalise(M)"):src.index("\n}\n", src.index("function normalise(M)")) + 3]
+        v1 = {"version": 1, "stages": {
+            "read": {"input": {"sim:integrator": "llg-heun"}, "dipole": {}},
+            "relax": {"input": {"sim:integrator": "monte-carlo"}},
+            "write": {"input": {"sim:integrator": "llg-heun"}, "hamr": {}}}}
+        js = fn + f"""const M = normalise({json.dumps(v1)});
+            console.log(JSON.stringify(M.runs.map(e => [e.id, e.title, e.type, e.ref || null, e.monte_carlo])));"""
+        res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(res, [["relax", "Relaxation", "monte-carlo", None, True], ["write", "Write", "hamr", None, False],
+                               ["read", "Read-back", "dipole-read", "write", False]])
 
 
 if __name__ == "__main__":

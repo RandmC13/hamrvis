@@ -1,4 +1,4 @@
-"""hamrvis command line: python3 -m hamrvis {reduce,view} ...  (see README.md)"""
+"""hamrvis command line: python3 -m hamrvis {reduce,view,export} ...  (see README.md)"""
 import argparse
 
 from . import reduce as red
@@ -7,8 +7,10 @@ from . import reduce as red
 def main():
     ap = argparse.ArgumentParser(prog="hamrvis", description="Reduce and view VAMPIRE HAMR simulations")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("reduce", help="reduce run directories (or a folder of them) to a viewer bundle")
+    r = sub.add_parser("reduce", help="reduce VAMPIRE runs (run directories or a folder of them) to a viewer bundle, one tab per run")
     r.add_argument("runs", nargs="+", help="run directories, or a folder whose subfolders are run directories")
+    r.add_argument("--order", nargs="+", metavar="DIR", help="run folder names in run order (default: the order the "
+                                                            "runs started, from their logs, then by name)")
     r.add_argument("-o", "--out", required=True, help="bundle directory to write")
     r.add_argument("--no-volume", action="store_true", help="skip the per-layer volume (saves ~90%% of the size)")
     r.add_argument("--layer-factor", type=int, help="per-layer cell size in atomic sites (1 = every atom; default 2, "
@@ -32,7 +34,7 @@ def main():
     a = ap.parse_args()
     if a.cmd == "reduce":
         red.reduce(a.runs, a.out, volume=not a.no_volume, every=a.every, Tc=a.tc, workers=a.workers, name=a.name,
-                   layer_factor=a.layer_factor)
+                   layer_factor=a.layer_factor, order=a.order)
     elif a.cmd == "export":
         from . import export
         export.export(a.bundle, a.out, a.grain_step, a.snap_step, not a.no_volume, a.limit_mb, a.artifact)

@@ -1,0 +1,72 @@
+04-11-2026 [13:27:25] Logfile opened
+04-11-2026 [13:27:25] Executable : vampire-serial
+04-11-2026 [13:27:25] Host name  : localhost:
+04-11-2026 [13:27:25] Directory  : /path/to/hamrvis/tests/runs/chain/relax
+04-11-2026 [13:27:25] Process ID : 49863
+04-11-2026 [13:27:25] Version    : 7.0.0
+04-11-2026 [13:27:25] Githash    : 
+04-11-2026 [13:27:25] Opening main input file "input".
+04-11-2026 [13:27:25]    Loading text file input on root process
+04-11-2026 [13:27:25]    File successfully loaded on root process with 904 characters and size 0.000904 [ 12.2266 ] MB/s
+04-11-2026 [13:27:25] Parsing system parameters from main input file.
+04-11-2026 [13:27:25] Opening material file "m.mat".
+04-11-2026 [13:27:25]    Loading text file m.mat on root process
+04-11-2026 [13:27:25]    File successfully loaded on root process with 366 characters and size 0.000366 [ 2.24247 ] MB/s
+04-11-2026 [13:27:25] Parsing material file for parameters.
+04-11-2026 [13:27:25] Setting periodic boundary conditions in x,y directions
+04-11-2026 [13:27:25] Generating neighbour interactions for a lattice of 5 x 5 x 5 unit cells for neighbour calculation
+04-11-2026 [13:27:25] Granular film: requested mean diameter = 3 nm
+  Placed 9 grains, 0 vanished during weight fitting.
+  Measured mean equivalent diameter: primary = 3.00999 nm (sd 1.06106 nm)
+  Warning: grain seed packing did not fully relax (jammed with max overlap fraction 0.198445 after 800 iterations).
+  Warning: grain weight fitting did not fully converge (achieved tolerance 0.307464 after 500 iterations).
+04-11-2026 [13:27:25] Generating Voronoi Grains.........done!
+04-11-2026 [13:27:25] Calculating alloy properties of system
+04-11-2026 [13:27:25] Removed 0 non-magnetic atoms from system
+04-11-2026 [13:27:25] Determining atomic composition:
+04-11-2026 [13:27:25] Material 1 FePt makes up 100 % of all atoms ( 2624 atoms )
+04-11-2026 [13:27:25] Material 2 fill makes up 0 % of all atoms ( 0 atoms )
+04-11-2026 [13:27:25] Memory required for neighbourlist calculation:0.0256 MB
+04-11-2026 [13:27:25] Allocating memory for supercell array in neighbourlist calculation
+04-11-2026 [13:27:25] 	Allocating memory done
+04-11-2026 [13:27:25] Populating supercell array for neighbourlist calculation...
+04-11-2026 [13:27:25] 	Populating supercell array completed
+04-11-2026 [13:27:25] Memory required for neighbour list:0.1536 MB
+04-11-2026 [13:27:25] Generating neighbour list...
+04-11-2026 [13:27:25] 	Neighbour list calculation complete
+04-11-2026 [13:27:25] Deallocating supercell array for neighbour list calculation
+04-11-2026 [13:27:25] 	Supercell array deallocated
+04-11-2026 [13:27:25] Copying system data to optimised data structures.
+04-11-2026 [13:27:25] Number of atoms generated on rank 0: 2624
+04-11-2026 [13:27:25] Memory required for copying to performance array on rank 0: 0.398848 MB RAM
+04-11-2026 [13:27:25] Identifying surface atoms using global threshold value of 6
+04-11-2026 [13:27:25] 1752 surface atoms found.
+04-11-2026 [13:27:25] Memory required for creation of 1D neighbour list on rank 0: 0.041984 MB RAM
+04-11-2026 [13:27:25] Initialising data structures for exchange calculation.
+04-11-2026 [13:27:25] Unrolled exchange template requires 0.104576MB RAM
+04-11-2026 [13:27:25] Generated 9 grains
+04-11-2026 [13:27:25] Number of atoms generated: 2624
+04-11-2026 [13:27:25] Host memory after system creation: current 8.61719 MB (largest rank), 8.61719 MB (all ranks); peak 8.75391 MB (largest rank), 8.75391 MB (all ranks)
+04-11-2026 [13:27:25] Initializing vampire modules
+04-11-2026 [13:27:25] Macrocell size = 10,10,10 Angstroms
+04-11-2026 [13:27:25] Macrocells in x,y,z: 13	7	2
+04-11-2026 [13:27:25] Total number of macrocells: 182
+04-11-2026 [13:27:25] Memory required for macrocell arrays: 0.01456 MB
+04-11-2026 [13:27:25] Calculated (magnetic) atomic volume: 27 cubic Angstroms
+04-11-2026 [13:27:25] Number of local macrocells on rank 0: 72
+04-11-2026 [13:27:25] Initialising data structures for anisotropy calculation for 2 materials
+04-11-2026 [13:27:25] Initialising statistics module
+04-11-2026 [13:27:25] Starting Simulation with Program Time-Series...
+04-11-2026 [13:27:25] Initialising configuration output... done!
+04-11-2026 [13:27:25] Total coordinate data filesize: 0.094464 MB
+04-11-2026 [13:27:25] Total spin data filesize (per snapshot): 0.062976 MB
+04-11-2026 [13:27:25] Outputting atomic coordinate file to disk 0.311063 GB/s in 0.000303681 s
+04-11-2026 [13:27:25] Outputting configuration file 00000000 to disk 0.455625 GB/s in 0.000138219 s [ 0.000728332 s]
+04-11-2026 [13:27:27] Simulation run time [s]: 1.28981
+04-11-2026 [13:27:27] Monte Carlo statistics:
+04-11-2026 [13:27:27] 	Total moves: 7.872e+06
+04-11-2026 [13:27:27] 	49.8831% Accepted
+04-11-2026 [13:27:27] 	50.1169% Rejected
+04-11-2026 [13:27:27] Host memory after simulation: current 9.20312 MB (largest rank), 9.20312 MB (all ranks); peak 9.20312 MB (largest rank), 9.20312 MB (all ranks)
+04-11-2026 [13:27:27] Checkpoint file written to disk.
+04-11-2026 [13:27:27] Simulation ended gracefully.
