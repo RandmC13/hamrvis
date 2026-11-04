@@ -7,12 +7,14 @@ Bundle layout (see docs/bundle-format.md):
     <run>/grain_lead.f64            grain.txt leading columns (time, temperature), [frames, n_lead]
     <run>/top/NNNNNNNN.i8.gz        snapshot NNNNNNNN: column-averaged magnetisation, [3, ny, nx] x 1/127
     <run>/vol/NNNNNNNN.i8.gz        snapshot NNNNNNNN: per-layer magnetisation, [3, nz, ny/2, nx/2] x 1/127
+                                      (.i16.gz x 1/32767 or .f32.gz with --precision 16 / 32)
     <run>/top_count.u8, vol_count.u8  magnetic atoms per pixel (0 = no magnetic atom: grain boundary)
     <run>/min_m.u8                  lowest column |m| any snapshot reached, x 1/255
     <run>/grain_map.i16             grain index of the magnetic atoms in each column, [ny, nx] (-1: none)
     <run>/dipole.f32                  dipole cell field, [3, nz, ny, nx] (T)
     <run>/dipole_atoms.u16             atoms per dipole cell (0 = field probe cell)
-Empty pixels hold -128 in the int8 arrays. Everything is little-endian.
+Empty pixels hold -128 (int8), -32768 (int16) or NaN (float32); grains.f32 replaces grains.i16 with
+--grain-precision 32. Everything is little-endian.
 """
 import contextlib
 import gzip
@@ -36,6 +38,7 @@ DECISION = 0.05     # m_z|m| below this in the final direction = not yet decided
 HEATED = 0.1        # |m| below this at some point = the grain was melted
 SETTLED = 0.3       # |final m_z|m|| below this = still disordered at the end
 FULL_FIELD = 0.4    # |B| / Hpeak at the decision above this = full field, below = reversal
+THRESHOLDS = dict(decision=DECISION, heated=HEATED, settled=SETTLED, full_field=FULL_FIELD)
 
 
 def log(msg):
@@ -44,12 +47,23 @@ def log(msg):
 
 # ------------------------------------------------------------------------------------------------ helpers
 def magnetic_types(run_dir):
-    """Material indices (0-based, as in the coordinate files) that are magnetic, from the material file."""
+    """Material indices (0-based, as in the coordinate files) that are magnetic, from the material file, or None
+    (every material counts as magnetic) when the run's material file is not there."""
     inp = vp.Input(run_dir)
-    mat = vp.read_keys(os.path.join(run_dir, inp.str("material:file")))
-    n = max(int(k.split("[")[1].split("]")[0]) for k in mat if k.startswith("material["))
-    nonmag = {int(k.split("[")[1].split("]")[0]) for k in mat if k.endswith(":non-magnetic")}
-    return [i - 1 for i in range(1, n + 1) if i not in nonmag]
+    name = inp.str("material:file")
+    path = os.path.join(run_dir, name) if name else None
+    if not path or not os.path.isfile(path):
+        log(f"  WARNING: material file {name!r} not in {run_dir}: every material is treated as magnetic "
+            f"(non-magnetic atoms would then count in the atom views)" if name else
+            f"  WARNING: the input names no material:file: every material is treated as magnetic")
+        return None
+    mat = vp.read_keys(path)
+    idx = [int(k.split("[")[1].split("]")[0]) for k in mat if k.startswith("material[")]
+    if not idx:
+        log(f"  WARNING: {name} defines no material[n] keys: every material is treated as magnetic")
+        return None
+    nonmag = {int(k.split("[")[1].split("]")[0]) for k in mat if k.startswith("material[") and k.endswith(":non-magnetic")}
+    return [i - 1 for i in range(1, max(idx) + 1) if i not in nonmag]
 
 
 def _pitch(values, tol=1e-3):
@@ -70,15 +84,15 @@ class Grid:
     per-layer grid of lf x lf sites per atomic layer (lf = 2 by default: one site per layer can be empty in
     non-cubic lattices, 2 x 2 sites never are inside a grain; larger when LAYER_MAX would be exceeded)."""
 
-    def __init__(self, Lx_nm, Ly_nm, xyz, layer_factor=None):
+    def __init__(self, Lx_nm, Ly_nm, xyz, layer_factor=None, top_max=TOP_MAX, layer_max=LAYER_MAX):
         self.p = _pitch(xyz[:, 0])                                # A
         self.pz = _pitch(xyz[:, 2])
         self.z0 = float(xyz[:, 2].min())
         self.nx0 = int(round(Lx_nm * 10 / self.p))
         self.ny0 = int(round(Ly_nm * 10 / self.p))
         self.nz = int(round((xyz[:, 2].max() - self.z0) / self.pz)) + 1
-        self.tf = max(1, math.ceil(math.sqrt(self.nx0 * self.ny0 / TOP_MAX)))
-        self.lf = layer_factor or max(2, math.ceil(math.sqrt(self.nx0 * self.ny0 * self.nz / LAYER_MAX)))
+        self.tf = max(1, math.ceil(math.sqrt(self.nx0 * self.ny0 / top_max)))
+        self.lf = layer_factor or max(2, math.ceil(math.sqrt(self.nx0 * self.ny0 * self.nz / layer_max)))
         self.nx, self.ny = -(-self.nx0 // self.tf), -(-self.ny0 // self.tf)
         self.vx, self.vy = -(-self.nx0 // self.lf), -(-self.ny0 // self.lf)
 
@@ -94,11 +108,24 @@ class Grid:
                     vy=self.vy)
 
 
-def _q8(sums, count):
-    """int8 mean direction components (x 1/127), -128 where a pixel has no atoms."""
+# snapshot grid encodings (--precision): bits -> (file tag, dtype, scale; None = stored as float32)
+ENCODINGS = {8: ("i8", np.int8, 127), 16: ("i16", np.int16, 32767), 32: ("f32", np.float32, None)}
+
+
+def _quantise(sums, count, bits=8):
+    """Mean direction components: int8 x 1/127 (-128 where a pixel has no atoms), int16 x 1/32767 (-32768) or
+    float32 (NaN)."""
+    _, dtype, sc = ENCODINGS[bits]
     with np.errstate(invalid="ignore", divide="ignore"):
-        q = np.rint(127 * sums / count)
-    return np.where(count > 0, np.clip(q, -127, 127), -128).astype(np.int8)
+        if sc is None:
+            return np.where(count > 0, sums / count, np.nan).astype(np.float32)
+        q = np.rint(sc * sums / count)
+    return np.where(count > 0, np.clip(q, -sc, sc), -sc - 1).astype(dtype)
+
+
+def _decode(q, bits=8):
+    sc = ENCODINGS[bits][2]
+    return q.astype(np.float64) if sc is None else q / sc
 
 
 def _write_gz(path, arr):
@@ -181,14 +208,17 @@ def _window_series(snaps, out_dir, keep):
 
 def _write_snapshot(idx, out_dir, top, vol, gs):
     g = _W["grid"]
-    qt = _q8(top, _W["ct"])
-    _write_gz(os.path.join(out_dir, "top", f"{idx:08d}.i8.gz"), qt.reshape(3, g.ny, g.nx))
+    bits = _W["bits"]
+    tag = ENCODINGS[bits][0]
+    qt = _quantise(top, _W["ct"], bits)
+    _write_gz(os.path.join(out_dir, "top", f"{idx:08d}.{tag}.gz"), qt.reshape(3, g.ny, g.nx))
     if vol is not None:
-        _write_gz(os.path.join(out_dir, "vol", f"{idx:08d}.i8.gz"), _q8(vol, _W["cv"]).reshape(3, g.nz, g.vy, g.vx))
+        _write_gz(os.path.join(out_dir, "vol", f"{idx:08d}.{tag}.gz"),
+                  _quantise(vol, _W["cv"], bits).reshape(3, g.nz, g.vy, g.vx))
     m = np.sqrt((top ** 2).sum(0)) / np.maximum(_W["ct"], 1)
     # largest rounding error of the stored columns against the full-precision means (checks the int8 encoding)
     with np.errstate(invalid="ignore", divide="ignore"):
-        q_err = np.nanmax(np.abs(qt[:, _W["ct"] > 0] / 127 - top[:, _W["ct"] > 0] / _W["ct"][_W["ct"] > 0]))
+        q_err = np.nanmax(np.abs(_decode(qt[:, _W["ct"] > 0], bits) - top[:, _W["ct"] > 0] / _W["ct"][_W["ct"] > 0]))
     return idx, m.astype(np.float32), gs, float(q_err)
 
 
@@ -217,7 +247,7 @@ def _join_rows(parts, times, dirs, dt):
 
 
 def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None,
-                 layer_factor=None):
+                 layer_factor=None, opts=None):
     """From the atom coordinates: exact top-down grain map, grain centres; then bin every spin snapshot onto the
     grids and check each snapshot's per-grain mean spin against grain.txt at the same time step."""
     run_dir = dirs[0]                                     # the jobs of a run share its atoms
@@ -227,12 +257,14 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
     Lx, Ly = entry["size_nm"][:2]
     mtypes, ids = entry["magnetic_types"], entry["grains"]["id"]
     nG = len(ids)
-    gindex = np.full(max(ids) + 2, nG, np.int64)          # grain ID -> grain index; nG collects other IDs
+    gindex = np.full(max(ids, default=-1) + 2, nG, np.int64)          # grain ID -> grain index; nG collects other IDs
     gindex[ids] = np.arange(nG)
     log(f"  reading {len(cfiles)} coordinate files")
     coords = [vp.read_coords(f) for f in cfiles]
-    allmag = np.concatenate([xyz[np.isin(t, mtypes)] for t, xyz, _ in coords])
-    grid = Grid(Lx, Ly, allmag, layer_factor)
+    magnetic = (lambda t: np.ones(len(t), bool)) if mtypes is None else (lambda t: np.isin(t, mtypes))
+    allmag = np.concatenate([xyz[magnetic(t)] for t, xyz, _ in coords])
+    opts = opts or {}
+    grid = Grid(Lx, Ly, allmag, layer_factor, opts.get("top_max", TOP_MAX), opts.get("layer_max", LAYER_MAX))
     del allmag
     have_ids = all(g is not None for _, _, g in coords)
     if not have_ids:
@@ -242,7 +274,7 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
     pairs = []
     cx, sx, cy, sy, na = (np.zeros(nG + 1) for _ in range(5))
     for t, xyz, g in coords:
-        mask = np.isin(t, mtypes)
+        mask = magnetic(t)
         kt, kv = grid.indices(xyz[mask])
         gi = gindex[np.clip(g[mask], 0, len(gindex) - 1)] if g is not None else np.full(mask.sum(), nG)
         ct += np.bincount(kt, minlength=ct.size)
@@ -258,7 +290,7 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
 
     # grain map: the grain of the magnetic atoms in each column (columns hold one grain in a columnar film; the
     # majority grain otherwise); -1 = no magnetic atom
-    if have_ids:
+    if have_ids and nG:
         key, cnt = np.unique(np.concatenate(pairs), return_counts=True)
         col, gr = key // (nG + 1), key % (nG + 1)
         order = np.lexsort((-cnt, col))                   # per column, most atoms first
@@ -284,6 +316,9 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
         G["magnetic_atoms"] = na[:nG].astype(int).tolist()
         G.pop("outline", None)
 
+    if not opts.get("snapshots", True):
+        log("  spin snapshots left out (--no-snapshots)")
+        return
     snaps = all_snaps = run_snapshots(dirs, entry["dt"])
     if not snaps:
         return
@@ -293,7 +328,8 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
         os.makedirs(os.path.join(out_dir, d), exist_ok=True)
     np.minimum(ct, 255).astype(np.uint8).tofile(os.path.join(out_dir, "top_count.u8"))
     np.minimum(cv, 255).astype(np.uint8).tofile(os.path.join(out_dir, "vol_count.u8"))
-    _W.update(grid=grid, bins=bins, ct=ct, cv=cv, volume=volume, n_grains=nG,
+    bits = opts.get("precision", 8)
+    _W.update(grid=grid, bins=bins, ct=ct, cv=cv, volume=volume, n_grains=nG, bits=bits,
               mask_index=[np.cumsum(mask) - 1 for mask, *_ in bins])
     jobs = [(i, files, out_dir) for i, _, files, _ in snaps]
     step_of = {i: int(round(t / entry["dt"])) for i, t, _, _ in snaps}
@@ -331,6 +367,8 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
     np.rint(np.clip(min_m, 0, 1) * 255).astype(np.uint8).tofile(os.path.join(out_dir, "min_m.u8"))
     entry["snapshots"] = dict(grid=grid.info(), volume=volume, skipped=sorted(bad),
                               frames=[dict(index=i, time=t) for i, t, *_ in snaps if i not in bad])
+    if bits != 8:
+        entry["snapshots"]["dtype"] = ENCODINGS[bits][0]
     same = [c[2] for c in checks if c[1] == 0]
     prev = [c[2] for c in checks if c[1] == 1]
     entry["checks"] = dict(column_rounding_max=q_max,
@@ -343,7 +381,7 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
 
 
 # ------------------------------------------------------------------------------------------------ tables
-def reduce_tables(dirs, out_dir, entry):
+def reduce_tables(dirs, out_dir, entry, opts=None):
     """'output' and grain.txt of a run (its segments joined), grain list and outlines."""
     run_dir, dt = dirs[0], entry["dt"]
     parts = [vp.read_output(d) for d in dirs]
@@ -354,6 +392,14 @@ def reduce_tables(dirs, out_dir, entry):
     out = _join_rows([o for _, o in parts], [None if ti is None else o[:, ti] for _, o in parts], dirs, dt)
     out.astype(np.float64).tofile(os.path.join(out_dir, "output.f64"))   # float32 loses steps beyond 2^24
     entry["output"] = dict(columns=cols, rows=len(out), dtype="f64")
+    if not os.path.exists(os.path.join(run_dir, "grain-coordinates.txt")):
+        # VAMPIRE writes it only for more than one grain: a continuous film (its grain.txt, if any, holds the
+        # whole film, which the output table has already)
+        log("  no grain-coordinates.txt (continuous film or not granular): no grain views")
+        entry["grains"] = dict(id=[], x=[], y=[], atoms=[], outline=[])
+        entry["notes"] = entry.get("notes", []) + ["no grain-coordinates.txt: VAMPIRE writes it only for granular "
+                                                   "systems, so this run has atom views only"]
+        return None, None
     gc = vp.read_grain_coordinates(run_dir)
     outlines = vp.grain_outlines(gc, vp.read_grain_shapes(run_dir))
     entry["grains"] = dict(
@@ -365,7 +411,12 @@ def reduce_tables(dirs, out_dir, entry):
     log("  parsing grain.txt")
     leads, ms = [], []
     for d in dirs:
-        cols, m = vp.read_grain_file(d, len(gc))
+        try:
+            cols, m = vp.read_grain_file(d, len(gc))
+        except ValueError as err:
+            log(f"  WARNING: grain.txt not used, so no grain magnetisation views: {err}")
+            entry["notes"] = entry.get("notes", []) + [f"grain.txt not used: {err}"]
+            return None, None
         if "time" in cols:
             t = cols["time"]
         elif "step" in cols:
@@ -373,16 +424,30 @@ def reduce_tables(dirs, out_dir, entry):
         else:   # neither grain:real-time nor grain:time-steps: frames are written every grain:output-rate steps
             if len(dirs) > 1:
                 raise SystemExit(f"{dirs}: grain.txt needs grain:real-time or grain:time-steps to join the jobs")
-            rate = vp.Input(d).num("grain:output-rate", 1, "s")
+            rate = vp.Input(d).num("grain:output-rate", 1, "int")
             t = (np.arange(len(m)) + 1) * rate * dt
             entry["grain_time_note"] = "grain.txt has no time column: frame times assumed from grain:output-rate"
         leads.append(np.stack([t, cols.get("temperature", np.full(len(m), np.nan))], axis=1))
         ms.append(m)
     lead = _join_rows(leads, [l[:, 0] for l in leads], dirs, dt)
     m = _join_rows(ms, [l[:, 0] for l in leads], dirs, dt)
-    np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
+    opts = opts or {}
+    every = opts.get("grain_every", 1)
+    if every > 1:   # thin the frames (the last one is kept); the write analysis then uses the kept frames too
+        keep = np.r_[np.arange(0, len(m) - 1, every), len(m) - 1]
+        lead, m = lead[keep], m[keep]
+    # stored from grain.txt's values (float64): quantising a float32 copy could miss the half-step bound
+    if opts.get("grain_precision", 16) == 32:
+        m.astype(np.float32).tofile(os.path.join(out_dir, "grains.f32"))
+    else:
+        np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
+    m = m.astype(np.float32)                                # the analysis and checks work on float32, as before
     lead.tofile(os.path.join(out_dir, "grain_lead.f64"))
     entry["grain_series"] = dict(frames=len(m), lead=["time", "temperature"], columns=list(cols))
+    if opts.get("grain_precision", 16) == 32:
+        entry["grain_series"]["dtype"] = "f32"
+    if every > 1:
+        entry["grain_series"]["every"] = every
     return lead, m
 
 
@@ -390,8 +455,12 @@ def reduce_dipole(run_dir, out_dir, entry):
     """Grid dipole-field.txt by cell ID: macrocells are numbered x-major, z fastest, on a grid of
     (L / cell size + 1) cells per axis. Its x, y, z columns are atom centroids, not cell centres."""
     d = vp.read_dipole_cells(run_dir)
-    cell = vp.Input(run_dir).num("cells:macro-cell-size", 2.0)              # nm
-    n = [int(round(L / cell)) + 1 for L in entry["size_nm"]]                # nx, ny, nz
+    inp = vp.Input(run_dir)
+    cell = []
+    for a in "xyz":   # cells:macro-cell-size sets all three axes, -x/-y/-z one; the last line wins (src/cells)
+        keys = [k for k in inp.keys if k in ("cells:macro-cell-size", f"cells:macro-cell-size-{a}")]
+        cell.append(inp.num(keys[-1]) if keys else 1.0)                      # nm; VAMPIRE's default is 10 A
+    n = [int(round(L / c)) + 1 for L, c in zip(entry["size_nm"], cell)]     # nx, ny, nz
     if n[0] * n[1] * n[2] != len(d) or not np.array_equal(d[:, 0], np.arange(len(d))):
         raise ValueError(f"dipole-field.txt has {len(d)} cells, expected {n[0]} x {n[1]} x {n[2]} in ID order")
     # file order is (x, y, z) with z fastest: reshape to [nx, ny, nz], store as [nz, ny, nx]
@@ -399,14 +468,18 @@ def reduce_dipole(run_dir, out_dir, entry):
     A = np.minimum(d[:, 1], 65535).reshape(n[0], n[1], n[2]).transpose(2, 1, 0).astype(np.uint16)
     np.ascontiguousarray(B).tofile(os.path.join(out_dir, "dipole.f32"))
     np.ascontiguousarray(A).tofile(os.path.join(out_dir, "dipole_atoms.u16"))
-    entry["dipole"] = dict(nx=n[0], ny=n[1], nz=n[2], cell_nm=cell)
+    entry["dipole"] = dict(nx=n[0], ny=n[1], nz=n[2], cell_nm=cell[0])
+    if len(set(cell)) > 1:
+        entry["dipole"]["cell_nm_xyz"] = cell
     # shortcut: atomistic_dipole_field.txt (per-atom read-back field) is not reduced yet; add it when the
     # cell field's 1 nm resolution is not enough for read-back analysis
 
 
 # ------------------------------------------------------------------------------------------------ write analysis
-def write_analysis(h, entry, lead, m, Tc=None):
+def write_analysis(h, entry, lead, m, Tc=None, thresholds=None):
     """Per-grain outcome of the write: intended polarity, final state, decision moment and its circumstances."""
+    th = dict(THRESHOLDS, **(thresholds or {}))
+    DECISION, HEATED, SETTLED, FULL_FIELD = (th[k] for k in ("decision", "heated", "settled", "full_field"))
     g = entry["grains"]
     gx, gy = np.array(g["x"]), np.array(g["y"])
     steps = np.rint(lead[:, 0] / h.dt).astype(np.int64)
@@ -518,7 +591,12 @@ def _prepare_out(out):
 
 
 # ------------------------------------------------------------------------------------------------ driver
-def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None, order=None):
+def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None, order=None,
+           opts=None):
+    """opts (all optional, defaults give today's bundle): precision 8|16|32 (snapshot grids), grain_precision
+    16|32, grain_every, snapshots (False: leave the spin snapshots out), top_max, layer_max, thresholds
+    {decision, heated, settled, full_field} of the write analysis."""
+    opts = opts or {}
     runs = rn.find(paths, order)
     if not runs:
         raise SystemExit(f"no run directories (folders with an 'input' file) in {paths}")
@@ -537,7 +615,7 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
                  segments=[os.path.abspath(d) for d in r.dirs],
                  input={k: v for k, (v, u) in inp.keys.items()},
                  input_units={k: u for k, (v, u) in inp.keys.items() if u},
-                 dt=inp.num("sim:time-step", 1e-15, "s"), monte_carlo=rn.is_monte_carlo(inp),
+                 dt=inp.num("sim:time-step", 1e-15, "time"), monte_carlo=rn.is_monte_carlo(inp),
                  size_nm=[inp.num(f"dimensions:system-size-{a}") for a in "xyz"],
                  magnetic_types=magnetic_types(run))
         if r.type != "hamr" and last_hamr:
@@ -549,16 +627,16 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
         if os.path.exists(meta):
             e["n_atoms"] = int(vp._meta_files(meta)[0].get("Number of atoms", "0").split()[0])
         e["source_files"] = {f: [os.path.getsize(os.path.join(run, f)), int(os.path.getmtime(os.path.join(run, f)))]
-                             for f in ("input", "output", "grain.txt", "dipole-field.txt")
-                             if os.path.exists(os.path.join(run, f))}
-        lead, m = reduce_tables(r.dirs, sd, e)
+                             for f in (inp.name, vp.output_name(run), "grain.txt", "dipole-field.txt")
+                             if f and os.path.exists(os.path.join(run, f))}
+        lead, m = reduce_tables(r.dirs, sd, e, opts)
         gsteps = np.rint(lead[:, 0] / e["dt"]).astype(np.int64) if lead is not None else None
-        reduce_atoms(r.dirs, sd, e, gsteps, m, volume, every, workers, layer_factor)
+        reduce_atoms(r.dirs, sd, e, gsteps, m, volume, every, workers, layer_factor, opts)
         if r.type == "hamr":
             h = vp.Hamr(run, r.dirs)
             e["hamr"] = h.params()
             if lead is not None:
-                write_analysis(h, e, lead, m, Tc)
+                write_analysis(h, e, lead, m, Tc, opts.get("thresholds"))
             last_hamr = r.id
         last = r.dirs[-1]                              # field maps are written at the end of a run
         if os.path.exists(os.path.join(last, "dipole-field.txt")):

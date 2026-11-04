@@ -5,7 +5,9 @@ B_applied); regenerate it with tests/make_fixture.sh if the formats change. fixt
 lead-in (half a bit + NPS) longer than a bit and two tracks, made by VAMPIRE before its bit loop was fixed: it reports
 6 bits but writes 4 (see its log). fixture-leadin-fixed is the same input run by the fixed VAMPIRE: all 6 bits.
 scenarios/ holds folders of chained runs (MC relax, writes, reads, a write split over two jobs, ...) made by
-tests/make_scenarios.py; the tests reduce each folder as a whole.
+tests/make_scenarios.py; the tests reduce each folder as a whole. They also cover two tracks with field-free bits,
+a continuous (grain-less) film, text snapshots, one data file per MPI process, and custom file names with other
+units. tests/fidelity/ checks bundles against an independent reader of the raw files.
 """
 import gzip
 import json
@@ -375,6 +377,260 @@ class Bundles(unittest.TestCase):
         res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(res, [["relax", "Relaxation", "monte-carlo", None, True], ["write", "Write", "hamr", None, False],
                                ["read", "Read-back", "dipole-read", "write", False]])
+
+
+def copy_run(src, d, edit=None):
+    """Copy run directory src to d (files only); edit(input text) -> new input text."""
+    shutil.copytree(src, d)
+    if edit:
+        name = vp.input_name(d)
+        text = open(os.path.join(d, name)).read()
+        open(os.path.join(d, name), "w").write(edit(text))
+    return d
+
+
+class Parsing(unittest.TestCase):
+    """VAMPIRE's file names, units and missing or damaged files."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+        vp.NAMES.update(input=None, output=None)
+
+    def write(self, text):
+        d = os.path.join(self.tmp, "r")
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "input"), "w").write(text)
+        return vp.Input(d)
+
+    def test_units_as_vampire_converts_them(self):
+        inp = self.write("a:x = 0.012 !um\nb:t = 0.001 !ps\nc:h = 15 !kOe\nd:v = 1.5e13\ne:v = 1500 !m/s\n"
+                         "f:x = 30\ng:n = 7 !fs\nh:t = 300\n")
+        self.assertAlmostEqual(inp.num("a:x"), 12.0)                       # nm
+        self.assertAlmostEqual(inp.num("b:t", kind="time"), 1e-15)
+        self.assertAlmostEqual(inp.num("c:h", kind="field"), 1.5)
+        self.assertAlmostEqual(inp.num("d:v", kind="velocity"), 1500.0)    # no unit: VAMPIRE's A/s
+        self.assertAlmostEqual(inp.num("e:v", kind="velocity"), 1500.0)
+        self.assertAlmostEqual(inp.num("f:x"), 3.0)                        # no unit: A
+        self.assertEqual(inp.num("g:n", kind="int"), 7)                    # VAMPIRE ignores units on integers
+        self.assertEqual(inp.num("h:t", kind="none"), 300.0)
+
+    def test_bad_units_say_what_is_wrong(self):
+        inp = self.write("a:x = 3 !furlong\nb:x = 3 !ns\nc:t = 300 !K\n")
+        with self.assertRaisesRegex(ValueError, "not one of VAMPIRE's units"):
+            inp.num("a:x")
+        with self.assertRaisesRegex(ValueError, "reads b:x as a length, but 'ns' is a time unit"):
+            inp.num("b:x")
+        with self.assertRaisesRegex(ValueError, "not one of VAMPIRE's units"):   # VAMPIRE rejects !K too
+            inp.num("c:t", kind="none")
+
+    def test_keys_as_vampire_reads_them(self):
+        inp = self.write("sim : time-step\t= 1 !fs # comment\nhamr:bit-size = 1 !nm\nhamr:bit-size = 2 !nm\n")
+        self.assertEqual(inp.keys["sim:time-step"], ("1", "fs"))
+        self.assertEqual(inp.num("hamr:bit-size"), 2.0)
+        self.assertEqual(list(inp.keys)[-1], "hamr:bit-size")
+
+    def test_custom_file_names(self):
+        d = os.path.join(SCEN, "custom-names", "write")
+        self.assertEqual((vp.input_name(d), vp.output_name(d)), ("write.in", "results.txt"))   # log, header
+        self.assertEqual([os.path.basename(r) for r in runs.candidates([os.path.dirname(d)])], ["write"])
+        vp.NAMES.update(input="nothing.in")
+        self.assertEqual(vp.input_name(d), "write.in")         # a name that is not there: found as before
+
+    def test_continued_jobs_with_a_custom_output_name(self):
+        # VAMPIRE appends a continued job's rows to its table without the header, so only --output-file finds it
+        root = os.path.join(self.tmp, "split")
+        shutil.copytree(os.path.join(SCEN, "split-write"), root)
+        for j in ("job1", "job2"):
+            os.rename(os.path.join(root, j, "output"), os.path.join(root, j, "results.txt"))
+        self.assertEqual([r.dirs for r in runs.find([root])], [[os.path.join(root, "job1")]])
+        vp.NAMES.update(output="results.txt")
+        found = runs.find([root])
+        self.assertEqual([[os.path.basename(d) for d in r.dirs] for r in found], [["job1", "job2"]])
+        a, b = os.path.join(self.tmp, "a"), os.path.join(self.tmp, "b")
+        reduce.reduce([root], a, workers=1)
+        vp.NAMES.update(output=None)
+        reduce.reduce([os.path.join(SCEN, "split-write")], b, workers=1)
+        for f in ("output.f64", "grains.i16", "grain_lead.f64"):
+            self.assertEqual(Path(a, "job1", f).read_bytes(), Path(b, "job1", f).read_bytes(), msg=f)
+
+    def test_custom_names_and_units_give_the_same_bundle(self):
+        # the same write as write-only, run with --input-file / --output-file and the lengths, times, fields and
+        # speed in other units (VAMPIRE's own output is identical)
+        a, b = os.path.join(self.tmp, "a"), os.path.join(self.tmp, "b")
+        reduce.reduce([os.path.join(SCEN, "write-only")], a, workers=1)
+        reduce.reduce([os.path.join(SCEN, "custom-names")], b, workers=1)
+        ea, eb = (json.load(open(os.path.join(x, "manifest.json")))["runs"][0] for x in (a, b))
+        for k in ("hamr", "analysis", "Tc", "dt", "size_nm", "snapshots", "grain_series", "output", "checks"):
+            self.assertEqual(ea[k], eb[k], msg=k)
+        for f in os.listdir(os.path.join(a, "write")):
+            if os.path.isfile(os.path.join(a, "write", f)):
+                self.assertEqual(Path(a, "write", f).read_bytes(), Path(b, "write", f).read_bytes(), msg=f)
+
+    def test_missing_material_file(self):
+        d = copy_run(os.path.join(SCEN, "write-only", "write"), os.path.join(self.tmp, "w"))
+        os.remove(os.path.join(d, "m.mat"))
+        self.assertIsNone(reduce.magnetic_types(d))
+        reduce.reduce([d], os.path.join(self.tmp, "b"), workers=1)
+        e = json.load(open(os.path.join(self.tmp, "b", "manifest.json")))["runs"][0]
+        self.assertIn("snapshots", e)
+        self.assertEqual(len(e["grains"]["magnetic_atoms"]), 9)
+
+    def test_continuous_film_has_atom_views_only(self):
+        reduce.reduce([os.path.join(SCEN, "continuous")], os.path.join(self.tmp, "b"), workers=1)
+        e = json.load(open(os.path.join(self.tmp, "b", "manifest.json")))["runs"][0]
+        self.assertEqual(e["grains"]["id"], [])
+        self.assertNotIn("grain_series", e)
+        self.assertNotIn("grain_map", e)
+        self.assertEqual(len(e["snapshots"]["frames"]), 11)
+        self.assertTrue(e["notes"])
+
+    def test_unusable_grain_file_skips_grain_views(self):
+        edit = lambda t: t.replace("grain:magnetisation", "grain:material-magnetisation\ngrain:magnetisation")
+        d = copy_run(os.path.join(SCEN, "write-only", "write"), os.path.join(self.tmp, "w"), edit)
+        reduce.reduce([d], os.path.join(self.tmp, "b"), workers=1)
+        e = json.load(open(os.path.join(self.tmp, "b", "manifest.json")))["runs"][0]
+        self.assertNotIn("grain_series", e)
+        self.assertIn("snapshots", e)
+        self.assertIn("material-magnetisation", " ".join(e["notes"]))
+
+    def test_truncated_text_snapshot(self):
+        d = copy_run(os.path.join(SCEN, "text-snapshots", "write"), os.path.join(self.tmp, "w"))
+        p = os.path.join(d, "spins-00000005.data")
+        data = open(p).read()
+        open(p, "w").write(data[: len(data) // 2])
+        with self.assertRaisesRegex(IOError, "truncated or damaged text file"):
+            vp.read_spins(p)
+        reduce.reduce([d], os.path.join(self.tmp, "b"), workers=1)
+        e = json.load(open(os.path.join(self.tmp, "b", "manifest.json")))["runs"][0]
+        self.assertEqual(e["snapshots"]["skipped"], [5])
+
+    def test_half_written_last_row(self):
+        d = copy_run(os.path.join(SCEN, "write-only", "write"), os.path.join(self.tmp, "w"))
+        for f in ("output", "grain.txt"):
+            text = open(os.path.join(d, f)).read()
+            open(os.path.join(d, f), "w").write(text[: -len(text.splitlines()[-1]) // 2 - 1])
+        cols, out = vp.read_output(d)
+        full = vp.read_output(os.path.join(SCEN, "write-only", "write"))[1]
+        np.testing.assert_array_equal(out, full[:-1])
+        lead, m = vp.read_grain_file(d, 9)
+        self.assertEqual(len(m), len(vp.read_grain_file(os.path.join(SCEN, "write-only", "write"), 9)[1]) - 1)
+
+    def test_dipole_cells_default_to_vampire_size(self):
+        # cells:macro-cell-size defaults to 10 A in VAMPIRE; the read was run with 1 nm cells written out
+        edit = lambda t: re.sub(r"cells:macro-cell-size.*\n", "", t)
+        d = copy_run(os.path.join(SCEN, "chain", "read"), os.path.join(self.tmp, "r"), edit)
+        e = dict(size_nm=[12.0, 6.0, 1.2])
+        os.makedirs(os.path.join(self.tmp, "out"))
+        reduce.reduce_dipole(d, os.path.join(self.tmp, "out"), e)
+        self.assertEqual(e["dipole"], dict(nx=13, ny=7, nz=2, cell_nm=1.0))
+
+
+class ReduceOptions(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def make(self, name, **opts):
+        out = os.path.join(self.tmp, name)
+        reduce.reduce([os.path.join(SCEN, "write-only")], out, workers=1, opts=opts)
+        return out, json.load(open(os.path.join(out, "manifest.json")))["runs"][0]
+
+    def test_defaults_add_nothing(self):
+        _, e = self.make("default")
+        self.assertNotIn("dtype", e["snapshots"])
+        self.assertNotIn("dtype", e["grain_series"])
+        self.assertNotIn("every", e["grain_series"])
+
+    def test_precision(self):
+        for bits, tag in ((16, "i16"), (32, "f32")):
+            out, e = self.make(f"p{bits}", precision=bits, grain_precision=32 if bits == 32 else 16)
+            self.assertEqual(e["snapshots"]["dtype"], tag)
+            self.assertTrue(os.path.exists(os.path.join(out, "write", "top", f"00000000.{tag}.gz")))
+            self.assertLess(e["checks"]["column_rounding_max"], 0.5 / 32767 + 1e-7)
+        self.assertEqual(e["grain_series"]["dtype"], "f32")
+        self.assertTrue(os.path.exists(os.path.join(out, "write", "grains.f32")))
+        export.export(out, os.path.join(self.tmp, "p32.html"))
+        html = open(os.path.join(self.tmp, "p32.html")).read()
+        self.assertIn('"write/grains.f32"', html)
+        self.assertIn('"write/top/00000000.f32.gz"', html)
+
+    def test_grain_every_and_no_snapshots(self):
+        _, full = self.make("full")
+        _, e = self.make("thin", grain_every=4, snapshots=False)
+        n = full["grain_series"]["frames"]
+        self.assertEqual(e["grain_series"]["frames"], len(range(0, n - 1, 4)) + 1)
+        self.assertNotIn("snapshots", e)
+        self.assertIn("grain_map", e)                       # grain shapes still come from the atoms
+
+    def test_thresholds_and_grid_limits(self):
+        _, e = self.make("th", thresholds=dict(heated=0.0), top_max=200)
+        self.assertEqual(e["analysis"]["thresholds"]["heated"], 0.0)
+        self.assertEqual({g["category"] for g in e["analysis"]["grains"]}, {"unheated"})
+        self.assertEqual(e["snapshots"]["grid"]["nx"], 20)  # 40 x 20 columns > 200 pixels: 2 x 2 columns per pixel
+
+    def test_inspect_every_scenario(self):
+        import contextlib, io
+        from hamrvis import inspect
+        for name in sorted(os.listdir(SCEN)):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                inspect.inspect([os.path.join(SCEN, name)])
+            text = buf.getvalue()
+            self.assertIn("estimated bundle", text, msg=name)
+            if name == "continuous":
+                self.assertIn("grain views   no", text)
+            if name == "custom-names":
+                self.assertIn("'write.in', output table 'results.txt'", text)
+
+    def test_serve_refuses_a_busy_port(self):
+        import socket
+        from hamrvis import serve
+        out, _ = self.make("serve")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            with self.assertRaisesRegex(SystemExit, "another viewer or program is using it"):
+                serve.serve(out, s.getsockname()[1], browser=False)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_viewer_decodes_every_precision(self):
+        src = open(APP).read()
+        code = src[src.index("const SNAP = "):src.index("// one snapshot array")]
+        js = code + """const raw = { i8: [0, 127, -127, -128], i16: [0, 32767, -32767, -32768], f32: [0, 0.25, -1, NaN] };
+            const out = Object.entries(SNAP).map(([k, [T, sc, E]]) => { const a = new T(raw[k]); a.S = sc; a.E = E;
+              return [0, 1, 2, 3].map(i => snapVal(a, i)); });
+            console.log(JSON.stringify(out.map(r => r.map(v => v !== v ? null : v))));"""
+        res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(res, [[0, 1, -1, None], [0, 1, -1, None], [0, 0.25, -1, None]])
+
+
+class NewScenarios(unittest.TestCase):
+    def test_head_field_matches_vampire_in_every_write(self):
+        h = vp.Hamr(os.path.join(SCEN, "two-tracks", "write"))
+        self.assertEqual((h.n_tracks, h.bits_per_track, h.written, h.sequence), (2, 3, 3, [1, 0, -1, 0, 1, -1]))
+        # '{1,1,-1}' is not VAMPIRE syntax: VAMPIRE reads the first bit as 0 (its stdout: "0 1 -1")
+        self.assertEqual(vp.Hamr(os.path.join(SCEN, "rewrite", "3-rewrite")).sequence, [0, 1, -1])
+        n = 0
+        for r in (r for name in os.listdir(SCEN) for r in runs.find([os.path.join(SCEN, name)]) if r.type == "hamr"):
+            h = vp.Hamr(r.dir, r.dirs)
+            for d in r.dirs:
+                cols, out = vp.read_output(d)
+                steps = np.rint(out[:, cols.index("Real_time")] / h.dt).astype(int)
+                np.testing.assert_allclose(h.field(steps), out[:, cols.index("B_applied")], atol=1e-12, err_msg=d)
+            n += 1
+        self.assertGreaterEqual(n, 10)
+
+    def test_file_per_process(self):
+        d = os.path.join(SCEN, "file-per-process", "write")
+        self.assertEqual(len(vp.coord_files(d)), 2)
+        self.assertEqual(len(vp.snapshots(d)[0][2]), 2)
 
 
 if __name__ == "__main__":

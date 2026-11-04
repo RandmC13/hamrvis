@@ -35,7 +35,11 @@ def serve(bundle, port=8737, browser=True):
     bundle = os.path.abspath(bundle)
     if not os.path.exists(os.path.join(bundle, "manifest.json")):
         raise SystemExit(f"{bundle} has no manifest.json: make it with 'python3 -m hamrvis reduce'")
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(Handler, bundle=bundle))
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), functools.partial(Handler, bundle=bundle))
+    except OSError as err:
+        raise SystemExit(f"cannot serve on port {port} ({err.strerror}): another viewer or program is using it; "
+                         f"stop it or choose another port with -p") from None
     url = f"http://127.0.0.1:{port}/"
     print(f"Viewing {bundle}\nOpen {url}  (Ctrl+C to stop)", flush=True)
     if browser:

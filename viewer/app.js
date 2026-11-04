@@ -114,10 +114,16 @@ async function loadStage(st) {
   d.nG = e.grains.id.length;
   if (e.grain_series) {
     const nF = e.grain_series.frames, nL = e.grain_series.lead.length;
-    d.g = new Int16Array(await getBuf(`${st}/grains.i16`));
+    const gt = e.grain_series.dtype || "i16";                  // grains.i16 (x 1/32767) or grains.f32 (exact)
+    d.g = gt === "f32" ? new Float32Array(await getBuf(`${st}/grains.f32`)) : new Int16Array(await getBuf(`${st}/grains.i16`));
+    d.gs = gt === "f32" ? 1 : 32767;
     d.lead = new Float64Array(await getBuf(`${st}/grain_lead.f64`));
     Object.assign(d, { nF, nL });
     d.time = Float64Array.from({ length: nF }, (_, f) => d.lead[f * nL]);
+    d.steps = Float64Array.from(d.time, t => Math.round(t / e.dt));
+  } else if (e.snapshots && e.snapshots.frames.length > 1) {   // no grain series (e.g. a continuous film): one frame per snapshot
+    const fr = e.snapshots.frames;
+    Object.assign(d, { nF: fr.length, time: Float64Array.from(fr, s => s.time) });
     d.steps = Float64Array.from(d.time, t => Math.round(t / e.dt));
   } else Object.assign(d, { nF: 1, time: [0], steps: [0] });
   const f64 = e.output && e.output.dtype === "f64", out = await tryBuf(`${st}/output.${f64 ? "f64" : "f32"}`);
@@ -135,28 +141,33 @@ async function loadStage(st) {
   d.an = e.analysis ? e.analysis.grains : null;
   return (D[st] = d);
 }
+// snapshot grid encodings (reduce --precision): array type, scale, empty-pixel marker
+const SNAP = { i8: [Int8Array, 127, -128], i16: [Int16Array, 32767, -32768], f32: [Float32Array, 1, NaN] };
+const snapPath = (d, kind, idx) => `${d.st}/${kind}/${String(idx).padStart(8, "0")}.${d.e.snapshots.dtype || "i8"}.gz`;
+const snapVal = (a, i) => { const v = a[i]; return v === a.E || v !== v ? NaN : v / a.S; };   // NaN: no atoms
 // one snapshot array, cached; returns null while loading and redraws when it arrives
 function snapArray(d, kind, idx) {
   const cache = d[kind];
   if (cache.has(idx)) return cache.get(idx);
-  const path = `${d.st}/${kind}/${String(idx).padStart(8, "0")}.i8.gz`;
+  const path = snapPath(d, kind, idx);
   if (!has(path)) { cache.set(idx, undefined); return undefined; }
   cache.set(idx, null);
-  getBuf(path).then(b => { cache.set(idx, new Int8Array(b)); if (cache.size > 80) cache.delete(cache.keys().next().value); redraw(); })
+  const [T, sc, empty] = SNAP[d.e.snapshots.dtype || "i8"];
+  getBuf(path).then(b => { const a = new T(b); a.S = sc; a.E = empty; cache.set(idx, a); if (cache.size > 80) cache.delete(cache.keys().next().value); redraw(); })
     .catch(() => cache.set(idx, undefined));
   return null;
 }
 function nearestSnap(d, step) {
   if (!d.snaps) return null;
   let best = null;
-  for (const s of d.snaps) if (has(`${d.st}/top/${String(s.index).padStart(8, "0")}.i8.gz`) &&
+  for (const s of d.snaps) if (has(snapPath(d, "top", s.index)) &&
     (!best || Math.abs(s.step - step) < Math.abs(best.step - step))) best = s;
   return best;
 }
 
 // ------------------------------------------------------------------------------------------------ grain helpers
-const gmz = (d, f, g) => { const o = (f * d.nG + g) * 4; return d.g[o + 2] / 32767 * d.g[o + 3] / 32767; };
-const gml = (d, f, g) => d.g[(f * d.nG + g) * 4 + 3] / 32767;
+const gmz = (d, f, g) => { const o = (f * d.nG + g) * 4; return d.g[o + 2] / d.gs * d.g[o + 3] / d.gs; };
+const gml = (d, f, g) => d.g[(f * d.nG + g) * 4 + 3] / d.gs;
 function frameAt(d, step) {                                       // last frame at or before step
   let lo = 0, hi = d.nF - 1;
   while (lo < hi) { const m = (lo + hi + 1) >> 1; if (d.steps[m] <= step) lo = m; else hi = m - 1; }
@@ -416,17 +427,17 @@ function pixelImage(d, view) {
   if (!s) return null;
   const agree = S.colour === "agree" && d.gmap;
   const col = (v, i) => {
-    if (v === -128) return vc;
-    if (agree) { const g = d.gmap[i], w = g >= 0 ? wantOf(d, g) : 0; return w ? rgbOf(LUT.agree, idxDiv(v / 127 * w)) : hex(css("--mid")); }
-    return rgbOf(LUT.m, idxDiv(v / 127));
+    if (v !== v) return vc;
+    if (agree) { const g = d.gmap[i], w = g >= 0 ? wantOf(d, g) : 0; return w ? rgbOf(LUT.agree, idxDiv(v * w)) : hex(css("--mid")); }
+    return rgbOf(LUT.m, idxDiv(v));
   };
   if (view === "atoms") {
     const a = snapArray(d, "top", s.index); if (!a) return null;
-    return pixImage(G.nx, G.ny, i => col(a[2 * G.nx * G.ny + i], i));
+    return pixImage(G.nx, G.ny, i => col(snapVal(a, 2 * G.nx * G.ny + i), i));
   }
   const a = snapArray(d, "vol", s.index); if (!a) return null;
   const n = G.vx * G.vy, o = 2 * G.nz * n + S.layer * n, r = lp(G) / G.pitch_nm;
-  return pixImage(G.vx, G.vy, i => col(a[o + i], Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))));
+  return pixImage(G.vx, G.vy, i => col(snapVal(a, o + i), Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))));
 }
 const lp = G => G.layer_pitch_nm || 2 * G.pitch_nm;
 function snapLabel(d, s) {
@@ -442,8 +453,8 @@ function filmTip(x, y) {
     const G = d.grid, ix = Math.floor(x / G.pitch_nm), iy = Math.floor(y / G.pitch_nm);
     const s = nearestSnap(d, d.steps[S.f]), a = s && snapArray(d, "top", s.index);
     if (a && ix >= 0 && ix < G.nx && iy >= 0 && iy < G.ny) {
-      const v = a[2 * G.nx * G.ny + iy * G.nx + ix];
-      rows.push(["column m<sub>z</sub>", v === -128 ? "–" : fmt(v / 127, 2)], ["atoms in column", d.topCount[iy * G.nx + ix]],
+      const v = snapVal(a, 2 * G.nx * G.ny + iy * G.nx + ix);
+      rows.push(["column m<sub>z</sub>", v !== v ? "–" : fmt(v, 2)], ["atoms in column", d.topCount[iy * G.nx + ix]],
                 ["lowest column |m|", fmt(d.minm[iy * G.nx + ix] / 255, 2)]);
     }
   }
@@ -479,8 +490,8 @@ function xzLane() {
         return;
       }
       const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / lp(G))));
-      const img = pixImage(G.vx, G.nz, i => { const v = a[2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx)];
-        return v === -128 ? LUT.void : rgbOf(LUT.m, idxDiv(v / 127)); });
+      const img = pixImage(G.vx, G.nz, i => { const v = snapVal(a, 2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx));
+        return v !== v ? LUT.void : rgbOf(LUT.m, idxDiv(v)); });
       blit(ctx, img, w, h);
       this._last = { img, s, st: d.st };
       setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×2`, snapLabel(d, s)]);
@@ -571,7 +582,7 @@ function sensorLane() {
       setNote("bmap", [`z ${zText(S.z)}`, `±${fmt(sc * 1e3, 0)} mT (99.5 %)`]);
     },
     hover(x, y) {
-      const d = cur(), P = d.e.dipole, ix = Math.floor(x / P.cell_nm), iy = Math.floor(y / P.cell_nm), n = P.nx * P.ny;
+      const d = cur(), P = d.e.dipole, ix = Math.floor(x / cellNm(P, 0)), iy = Math.floor(y / cellNm(P, 1)), n = P.nx * P.ny;
       const B = c => d.B[c * P.nz * n + S.z * n + iy * P.nx + ix] * 1e3;
       return kv([["x, y, z", `${fmt(x)}, ${fmt(y)}, ${zText(S.z)}`], ["B<sub>x</sub>", `${fmt(B(0))} mT`], ["B<sub>y</sub>", `${fmt(B(1))} mT`], ["B<sub>z</sub>", `${fmt(B(2))} mT`]]);
     },
@@ -579,17 +590,18 @@ function sensorLane() {
     drag: dragSection,
   };
 }
-const zText = iz => `${fmt((iz + .5) * cur().e.dipole.cell_nm, 1)} nm`;
+const cellNm = (P, a) => P.cell_nm_xyz ? P.cell_nm_xyz[a] : P.cell_nm;   // dipole cell size along x, y, z (nm)
+const zText = iz => `${fmt((iz + .5) * cellNm(cur().e.dipole, 2), 1)} nm`;
 function bxzLane() {
   return {
     id: "bxz", group: "bottom", title: "B<sub>z</sub> x–z",
     height: w => Math.round(w * cur().e.size_nm[2] / Lx() * 2),
     draw(ctx, w, h) {
-      const d = cur(), P = d.e.dipole, n = P.nx * P.ny, iy = Math.min(P.ny - 1, Math.floor(S.ysec / P.cell_nm));
+      const d = cur(), P = d.e.dipole, n = P.nx * P.ny, iy = Math.min(P.ny - 1, Math.floor(S.ysec / cellNm(P, 1)));
       blit(ctx, fieldImage(P, P.nz - 1, (iz, ix) => d.B[2 * P.nz * n + iz * n + iy * P.nx + ix], d.bscale || .05), w, h, true);
       const yz = z => h - z / cur().e.size_nm[2] * h;
       ctx.strokeStyle = css("--ink"); ctx.setLineDash([4, 3]); ctx.globalAlpha = .6;
-      for (const z of [10, (S.z + .5) * P.cell_nm]) { ctx.beginPath(); ctx.moveTo(0, yz(z)); ctx.lineTo(w, yz(z)); ctx.stroke(); }
+      for (const z of [10, (S.z + .5) * cellNm(P, 2)]) { ctx.beginPath(); ctx.moveTo(0, yz(z)); ctx.lineTo(w, yz(z)); ctx.stroke(); }
       ctx.setLineDash([]); ctx.globalAlpha = 1;
       setNote("bxz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(d.e.size_nm[2], 0)} nm, ×2`]);
     },
@@ -616,19 +628,19 @@ function waveLane() {
         ctx.setLineDash([]);
       }
       ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.6; ctx.beginPath();
-      wv.forEach((v, ix) => { const xx = X((ix + .5) * P.cell_nm, w); ix ? ctx.lineTo(xx, y(v)) : ctx.moveTo(xx, y(v)); }); ctx.stroke();
+      wv.forEach((v, ix) => { const xx = X((ix + .5) * cellNm(P, 0), w); ix ? ctx.lineTo(xx, y(v)) : ctx.moveTo(xx, y(v)); }); ctx.stroke();
       ctx.fillStyle = css("--muted"); ctx.font = `500 11px ${css("--font")}`; ctx.textAlign = "left";
       ctx.fillText(`+${fmt(lim * 1e3, 0)} mT`, 4, 12); ctx.fillText(`−${fmt(lim * 1e3, 0)} mT`, 4, h - 4);
       setNote("wave", [`mean B_z, y ${fmt(S.ysec)} ± ${fmt(S.rw / 2)} nm`, `z ${zText(S.z)}`, "dotted: intended transitions"]);
     },
-    hover(x) { const d = cur(), wv = waveform(d), ix = Math.floor(x / d.e.dipole.cell_nm); return kv([["x", `${fmt(x)} nm`], ["B<sub>z</sub>", `${fmt((wv[ix] || 0) * 1e3)} mT`]]); },
+    hover(x) { const d = cur(), wv = waveform(d), ix = Math.floor(x / cellNm(d.e.dipole, 0)); return kv([["x", `${fmt(x)} nm`], ["B<sub>z</sub>", `${fmt((wv[ix] || 0) * 1e3)} mT`]]); },
   };
 }
 function waveform(d) {
   const P = d.e.dipole, Bz = dipoleLayer(d, S.z), out = new Array(P.nx - 1).fill(0);
   let n = 0;
   for (let iy = 0; iy < P.ny - 1; iy++) {
-    if (Math.abs((iy + .5) * P.cell_nm - S.ysec) > S.rw / 2) continue;
+    if (Math.abs((iy + .5) * cellNm(P, 1) - S.ysec) > S.rw / 2) continue;
     n++; for (let ix = 0; ix < P.nx - 1; ix++) out[ix] += Bz[iy * P.nx + ix];
   }
   return out.map(v => v / Math.max(n, 1));
@@ -853,7 +865,7 @@ function stageFacts(st) {
     generic && ["grains", d.nG], e.ref && !e.v1 && ["compared with", `${S.M.byId[e.ref].title} (${e.ref})`],
     bits.length && ["bits ✓ (written state)", `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
     (e.dipole || !generic) && ["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
-    e.dipole && ["cell size", `${e.dipole.cell_nm} nm`]];
+    e.dipole && ["cell size", e.dipole.cell_nm_xyz ? `${e.dipole.cell_nm_xyz.join(" x ")} nm` : `${e.dipole.cell_nm} nm`]];
 }
 function legendHtml() {
   const d = cur(), iso = isotherms(d).sort((a, b) => b.T - a.T).map(({ T, w, dash }) =>
@@ -956,6 +968,7 @@ function drawDetails() {
   const facts = [["source", e.source], ["reduced", S.M.created]];
   const from = e.grain_map && (e.grain_map.from_run || e.grain_map.from_stage);
   if (e.segments && e.segments.length > 1) facts.splice(1, 0, ["continued in", e.segments.slice(1).join(", ")]);
+  for (const n of e.notes || []) facts.push(["note", n]);
   if (e.grain_map) facts.push(["grain shapes", `from atom coordinates${from ? ` (${from} ${e.grain_map.from_run ? "run" : "stage"})` : ""}, ${e.grain_map.mixed_columns} mixed columns`]);
   if (ck) {
     facts.push(["stored columns vs exact", `≤ ${fmt(ck.column_rounding_max, 4)}`]);
@@ -981,7 +994,7 @@ function syncControls() {
   const d = cur();
   for (const [id, v] of [["v-grains", "grains"], ["v-atoms", "atoms"], ["v-layer", "layer"]]) {
     $(id).setAttribute("aria-pressed", S.view === v);
-    $(id).disabled = v !== "grains" && !(d.snaps && (v === "atoms" || d.e.snapshots.volume));
+    $(id).disabled = v === "grains" ? !d.nG && !!d.snaps : !(d.snaps && (v === "atoms" || d.e.snapshots.volume));
   }
   const hasAn = !!(d.an || (refD(d) && refD(d).an));
   for (const [id, v] of [["c-mz", "mz"], ["c-agree", "agree"], ["c-peak", "peak"], ["c-minm", "minm"]]) {
@@ -1083,8 +1096,9 @@ async function setStage(st) {
   S.f = S.fa = e.hamr ? 0 : d.nF - 1;
   const C = cellGeom(d);
   S.ysec = C ? C.p.TW * .5 + C.p.pad : e.size_nm[1] / 2;
-  if (e.dipole) S.z = Math.min(e.dipole.nz - 2, Math.round(e.size_nm[2] * .55 / e.dipole.cell_nm));
+  if (e.dipole) S.z = Math.min(e.dipole.nz - 2, Math.round(e.size_nm[2] * .55 / cellNm(e.dipole, 2)));
   if (S.view !== "grains" && !d.snaps) S.view = "grains";
+  if (S.view === "grains" && !d.nG && d.snaps) S.view = "atoms";      // no grains (continuous film): atom views only
   if ((S.colour === "peak" && !d.model) || (S.colour === "agree" && !C)) S.colour = "mz";
   document.querySelectorAll("#chain button").forEach(b => b.setAttribute("aria-pressed", b.dataset.stage === st));
   try { history.replaceState(null, "", "#" + st); } catch (err) { /* sandboxed */ }
@@ -1136,7 +1150,7 @@ async function main() {
   const runs = S.M.runs, any = runs.find(e => e.hamr) || runs[0];
   $("run-name").textContent = S.M.name;
   const nat = (runs.find(e => e.hamr && e.n_atoms) || runs.find(e => e.n_atoms) || {}).n_atoms;
-  $("run-sub").textContent = [nat ? `${nat.toLocaleString()} atoms` : null, `${any.grains.id.length} grains`,
+  $("run-sub").textContent = [nat ? `${nat.toLocaleString()} atoms` : null, any.grains.id.length ? `${any.grains.id.length} grains` : "no grains",
     `${any.size_nm.map(v => fmt(v, 0)).join(" × ")} nm`].filter(Boolean).join(", ");
   document.title = `${S.M.name} HAMR run`;
   buildChain();

@@ -42,10 +42,25 @@ python3 -m hamrvis export bundles/<name> -o <name>.html --grain-step 8      # mu
 
 | Command | What it does |
 |---|---|
-| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories; each run becomes a tab (see *Runs and tabs*). Options: `--order DIR ...` (tab order by folder name), `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers). |
-| `python3 -m hamrvis view <bundle>` | Serves the viewer and the bundle on `127.0.0.1:8737` (`-p` to change). |
+| `python3 -m hamrvis inspect <runs...>` | Lists the runs found in tab order and, per run, its type, file names, what each view needs and whether it is there (with the input keyword that would add it), and the estimated bundle size and reduce time. Reads only small files: run it first, and include its output when reporting a problem. Takes the same options as `reduce`. |
+| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories; each run becomes a tab (see *Runs and tabs*). Options: `--order DIR ...` (tab order by folder name), `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers); see *Reduce options* for the rest. |
+| `python3 -m hamrvis view <bundle>` | Serves the viewer and the bundle on `127.0.0.1:8737` (`-p` to change; a port in use is reported). |
 | `python3 -m hamrvis export <bundle> -o page.html` | One self-contained page. `--grain-step N` keeps every N-th grain frame, `--snap-step N` every N-th snapshot, `--no-volume`, `--artifact` (no document skeleton, for localhost.ai). |
 | `python3 -m unittest discover tests` | Tests (needs node for the viewer-model test). |
+
+### Reduce options
+
+All optional; without them the bundle is the same as before they existed.
+
+| Option | Effect |
+|---|---|
+| `--precision 8\|16\|32` | Snapshot grids stored as int8 (1/127, default), int16 (1/32767) or float32 |
+| `--grain-precision 16\|32` | Grain series stored as int16 (1/32767, default) or float32 (grain.txt's values) |
+| `--grain-every N` | Keep every N-th grain.txt frame (and the last); the write analysis then uses the kept frames |
+| `--no-snapshots` | Leave the spin snapshots out (grain views and grain shapes stay) |
+| `--top-max P`, `--layer-max C` | Pixels per snapshot before the column map / layer grid is coarsened (4e6, 2.5e6) |
+| `--decision`, `--heated`, `--settled`, `--full-field` | Write analysis thresholds (docs/analysis.md) |
+| `--input-file NAME`, `--output-file NAME` | The runs' input and output file names, if VAMPIRE was run with `--input-file` / `--output-file` and they are not found automatically (see below) |
 
 ## What the run needs to write
 
@@ -83,7 +98,19 @@ Nothing is tied to one run. The reducer reads everything from the run's own file
 - tracks, bits per track and the bit sequence follow VAMPIRE's rules (`hamr:number-of-bits`, `track-size`,
   `track-padding`, single-tone or user-defined sequences, field-free `0` bits);
 - the head field follows `sim:min/maximum-applied-field-strength`, rise/fall times and the field direction;
-- `grain.txt` columns follow the input's `grain:` keywords in order (`time-steps` or `real-time` etc.);
+- `grain.txt` columns follow the input's `grain:` keywords in order (`time-steps` or `real-time` etc.); a
+  `grain.txt` hamrvis cannot read (no `grain:magnetisation`, or an unknown keyword before it) leaves out the grain
+  views with a note instead of stopping;
+- input files are read as VAMPIRE reads them: every unit VAMPIRE knows (`!um`, `!kOe`, `!ps`, `!nm/ns`, ...), values
+  without a unit in VAMPIRE's internal units (A, s, T, A/s: a bare `hamr:head-speed = 3e11` is 30 m/s), integer lists
+  such as `hamr:bit-sequence` read the way VAMPIRE reads them; an unknown unit or one of the wrong kind is an error
+  naming the key;
+- file names: the input is `input` or the one the log names (`Opening main input file`); the output table is
+  `output` or the file starting with VAMPIRE's `# Output file for vampire simulation` header. A job continued from
+  a checkpoint appends to its table without that header, so a custom output name there needs `--output-file`;
+- a missing material file: every material counts as magnetic (with a warning); continuous films (no
+  `grain-coordinates.txt`, which VAMPIRE writes only for granular systems) get atom views only, with the snapshots
+  as frames; a last row a stopped job left half-written in `output` or `grain.txt` is left out;
 - snapshots in binary or text, single file or one file per node or process; truncated copies are skipped with a
   warning;
 - window snapshots of `hamr:active-window` runs (only the atoms near the head, `Spin data: window` in the `.meta`

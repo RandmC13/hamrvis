@@ -1,0 +1,11 @@
+material:num-materials=2
+material[1]:material-name=FePt
+material[1]:damping-constant=0.1
+material[1]:exchange-matrix[1]=6.0e-21
+material[1]:atomic-spin-moment=2.0 !muB
+material[1]:uniaxial-anisotropy-constant=2.0e-22
+material[1]:initial-spin-direction=0,0,1
+material[2]:material-name=fill
+material[2]:non-magnetic=keep
+material[2]:fill-space
+material[2]:density=0.0

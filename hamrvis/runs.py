@@ -42,23 +42,25 @@ class Run:
 
 
 def candidates(paths):
-    """Run directories among paths and their immediate subfolders. A path given directly must hold an 'input'; in a
-    scanned folder only subfolders with both 'input' and 'output' (a run that ran) count, so copies of inputs or
-    source trees next to the runs are skipped."""
+    """Run directories among paths and their immediate subfolders. A path given directly must hold a VAMPIRE input
+    file; in a scanned folder only subfolders with both an input file and an output table (a run that ran) count,
+    so copies of inputs or source trees next to the runs are skipped. File names: see vampire.input_name and
+    output_name."""
     runs = []
     for p in paths:
-        if os.path.exists(os.path.join(p, "input")):
+        if os.path.isdir(p) and vp.input_name(p):
             runs.append(p)
             continue
         if not os.path.isdir(p):
             raise SystemExit(f"{p}: not a directory")
         for d in sorted(os.listdir(p)):
             q = os.path.join(p, d)
-            if os.path.exists(os.path.join(q, "input")):
-                if os.path.exists(os.path.join(q, "output")):
+            if os.path.isdir(q) and vp.input_name(q):
+                if vp.output_name(q):
                     runs.append(q)
                 else:
-                    print(f"skipping {q}: it has an input file but no output (not a run)")
+                    print(f"skipping {q}: it has an input file but no output table (not a run; if VAMPIRE was run "
+                          f"with --output-file, give that name with --output-file)")
     return runs
 
 
@@ -75,7 +77,7 @@ def _continues(prev, d):
         cols, out = vp.read_output(prev)
     except (OSError, ValueError, IndexError):
         return False
-    dt = vp.Input(prev).num("sim:time-step", 1e-15, "s")
+    dt = vp.Input(prev).num("sim:time-step", 1e-15, "time")
     t = out[:, cols.index("Real_time")] if "Real_time" in cols else None
     return t is not None and len(t) and t[-1] / dt >= step - 1
 

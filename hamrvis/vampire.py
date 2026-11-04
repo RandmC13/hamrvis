@@ -10,30 +10,116 @@ import re
 
 import numpy as np
 
-# unit tag -> factor to nm, s, m/s or T (VAMPIRE's defaults are Angstrom, s, T)
-_UNITS = {"nm": 1.0, "A": 0.1, "m": 1e9, "m/s": 1.0, "s": 1.0, "ns": 1e-9, "ps": 1e-12, "fs": 1e-15, "T": 1.0,
-          "mT": 1e-3, "muB": 1.0, "K": 1.0}
+# VAMPIRE's unit table (src/utility/units.cpp): unit -> (factor to VAMPIRE's internal unit, kind). Internal units are
+# A, s, T, A/s, J, J/T; a value without a unit is in the internal unit. VAMPIRE stops on an unknown unit or one of
+# the wrong kind for the key, so a run that ran only used these.
+_UNITS = {
+    "A": (1.0, "length"), "m": (1e10, "length"), "cm": (1e8, "length"), "mm": (1e7, "length"), "um": (1e4, "length"),
+    "nm": (1e1, "length"), "pm": (1e-3, "length"), "in": (2.54e8, "length"), "feet": (3.12e9, "length"),
+    "J": (1.0, "energy"), "eV": (1.602176634e-19, "energy"), "meV": (1.602176634e-22, "energy"),
+    "erg": (1e-7, "energy"), "Ryd": (2.17987208e-18, "energy"), "mRyd": (2.17987208e-21, "energy"),
+    "Ht": (4.35974417e-18, "energy"), "zJ": (1e-21, "energy"),
+    "J/T": (1.0, "moment"), "Amm": (1.0, "moment"), "erg/G": (1e-3, "moment"), "abAcmcm": (1e-3, "moment"),
+    "muB": (9.2740100783e-24, "moment"), "eV/T": (1.602176634e-19, "moment"), "erg/Oe": (1e-3, "moment"),
+    "A/m": (1e-30, "magnetisation"), "emu/cc": (1e-27, "magnetisation"), "J/T/AAA": (1.0, "magnetisation"),
+    "J/atom": (1.0, "anisotropy"), "J/mmm": (1e-30, "anisotropy"), "erg/cc": (1e-31, "anisotropy"),
+    "T": (1.0, "field"), "mT": (1e-3, "field"), "uT": (1e-6, "field"), "Oe": (1e-4, "field"), "kOe": (1e-1, "field"),
+    "s": (1.0, "time"), "ms": (1e-3, "time"), "us": (1e-6, "time"), "ns": (1e-9, "time"), "ps": (1e-12, "time"),
+    "fs": (1e-15, "time"), "as": (1e-18, "time"), "zs": (1e-21, "time"),
+    "Ohm-m": (1.0, "resistivity"),
+    "V": (1.0, "potential"), "mV": (1e-3, "potential"), "uV": (1e-6, "potential"), "nV": (1e-9, "potential"),
+    "Hz": (1.0, "frequency"), "kHz": (1e3, "frequency"), "MHz": (1e6, "frequency"), "GHz": (1e9, "frequency"),
+    "THz": (1e12, "frequency"),
+    "J/m": (1e-10, "exchange"), "erg/cm": (1e-15, "exchange"), "erg/cm2": (1e-23, "mm_energy"),
+    "A/s": (1.0, "velocity"), "m/s": (1e10, "velocity"), "cm/s": (1e8, "velocity"), "mm/s": (1e7, "velocity"),
+    "um/s": (1e4, "velocity"), "nm/s": (1e1, "velocity"), "pm/s": (1e-3, "velocity"), "in/s": (2.54e8, "velocity"),
+    "feet/s": (3.12e9, "velocity"), "A/ms": (1e3, "velocity"), "A/us": (1e6, "velocity"), "A/ns": (1e9, "velocity"),
+    "A/ps": (1e12, "velocity"), "nm/ns": (1e8, "velocity"),
+}
+# hamrvis works in nm, s, T and m/s: internal VAMPIRE value / factor. "none" (temperatures in K, plain numbers)
+# takes no unit; "int" keys are read as integers by VAMPIRE, which ignores any unit on them.
+_OUT = {"length": 10.0, "time": 1.0, "field": 1.0, "velocity": 1e10, "none": 1.0}
 
 
 def read_keys(path):
     """{key: (value, unit or None)} for every 'key = value !unit' line of a VAMPIRE input or material file.
-    Keys without a value (flags) map to ("", None). Later lines win, as in VAMPIRE."""
+    Keys without a value (flags) map to ("", None). Later lines win, as in VAMPIRE, and the keys are in the order
+    of the line that last set them. Whitespace inside keys is ignored (VAMPIRE removes all of it)."""
     keys = {}
-    for line in open(path):
+    for line in open(path, errors="replace"):
         line = line.split("#")[0].strip()
         if not line:
             continue
         k, _, v = (s.strip() for s in line.partition("="))
         v, _, unit = (s.strip() for s in v.partition("!"))
-        keys[k.replace(" ", "")] = (v, unit or None)
+        k = "".join(k.split())
+        keys.pop(k, None)
+        keys[k] = (v, "".join(unit.split()) or None)
     return keys
+
+
+# names VAMPIRE gives its main files unless run with --input-file / --output-file; set by the command line flags
+NAMES = {"input": None, "output": None}
+
+
+def _log_head(run_dir, n=40):
+    try:
+        with open(os.path.join(run_dir, "log"), errors="replace") as f:
+            return [f.readline() for _ in range(n)]
+    except OSError:
+        return []
+
+
+def input_name(run_dir):
+    """File name of a run's main input: --input-file if given and present, else 'input', else the name the log says VAMPIRE
+    opened ('Opening main input file "..."', written when VAMPIRE starts), or None."""
+    if NAMES["input"] and os.path.isfile(os.path.join(run_dir, NAMES["input"])):   # else found as without the flag
+        return NAMES["input"]
+    if os.path.isfile(os.path.join(run_dir, "input")):
+        return "input"
+    for line in _log_head(run_dir):
+        m = re.search(r'Opening main input file "(.+)"', line)
+        if m and os.path.isfile(os.path.join(run_dir, m.group(1))):
+            return m.group(1)
+    return None
+
+
+def output_name(run_dir):
+    """File name of a run's 'output' table: --output-file if given and present, else 'output', else the one file of the run
+    directory whose second line is VAMPIRE's '# Output file for vampire simulation' (VAMPIRE does not log the
+    name of the file given with --output-file; a job continued from a checkpoint appends to it without the header,
+    so there the name must be given), or None."""
+    if NAMES["output"] and os.path.isfile(os.path.join(run_dir, NAMES["output"])):   # else found as without the flag
+        return NAMES["output"]
+    if os.path.isfile(os.path.join(run_dir, "output")):
+        return "output"
+    found = []
+    for f in sorted(os.listdir(run_dir)):
+        p = os.path.join(run_dir, f)
+        if f.endswith((".data", ".meta", ".chk")) or not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                head = fh.read(400).split(b"\n")
+        except OSError:
+            continue
+        if len(head) > 1 and head[1].startswith(b"# Output file for vampire simulation"):
+            found.append(f)
+    if len(found) > 1:
+        raise SystemExit(f"{run_dir}: several VAMPIRE output tables ({', '.join(found)}): choose one with --output-file")
+    return found[0] if found else None
 
 
 class Input:
     """A run's input file with typed access."""
 
     def __init__(self, run_dir):
-        self.keys = read_keys(os.path.join(run_dir, "input"))
+        name = input_name(run_dir)
+        if name is None:
+            raise SystemExit(f"{run_dir}: no VAMPIRE input file (looked for 'input' and the name in the log; "
+                             f"use --input-file NAME)")
+        self.name = name
+        self.keys = read_keys(os.path.join(run_dir, name))
 
     def has(self, key):
         return key in self.keys
@@ -41,22 +127,45 @@ class Input:
     def str(self, key, default=None):
         return self.keys[key][0] if key in self.keys else default
 
-    def num(self, key, default=None, default_unit="A"):
-        """Value converted to nm / s / m/s / T; default_unit is VAMPIRE's unit for the key when no '!unit' is given."""
+    def num(self, key, default=None, kind="length"):
+        """Value of a key VAMPIRE reads as kind ("length", "time", "field", "velocity", "none" or "int"),
+        converted as VAMPIRE converts it and returned in nm / s / T / m/s (default is returned as given)."""
         if key not in self.keys:
             return default
         v, unit = self.keys[key]
-        return float(v) * _UNITS[unit or default_unit]
+        if kind == "int":
+            return int(float(v))
+        factor, got = _UNITS.get(unit, (None, None)) if unit else (1.0, kind)
+        if factor is None:
+            raise ValueError(f"{key} = {v} !{unit}: '{unit}' is not one of VAMPIRE's units (src/utility/units.cpp)")
+        if got != kind:
+            raise ValueError(f"{key} = {v} !{unit}: VAMPIRE reads {key} as a {kind}, but '{unit}' is a {got} unit")
+        return float(v) * factor / _OUT[kind]
+
+
+def vampire_integers(text):
+    """Integer list as VAMPIRE's vin::integers_from_string reads it: comma separated, each field read with
+    'stream >> int', which takes a leading [+-]digits and gives 0 when the field does not start with one. So
+    '{1,0,-1}' (braces are not VAMPIRE syntax) reads as 0, 0, -1, as VAMPIRE writes it."""
+    return [int(m.group()) if (m := re.match(r"[+-]?\d+", f)) else 0 for f in "".join(text.split()).split(",")]
 
 
 # ----------------------------------------------------------------------------------------------- text tables
 def read_output(run_dir):
     """(column names, float64 [rows, cols]) of the 'output' file; needs output:column-headers."""
-    lines = [l for l in open(os.path.join(run_dir, "output")) if not l.startswith("#") and l.strip()]
+    name = output_name(run_dir)
+    if name is None:
+        raise ValueError(f"{run_dir}: no VAMPIRE output table (looked for 'output' and for VAMPIRE's header in the "
+                         f"other files; use --output-file NAME)")
+    lines = [l for l in open(os.path.join(run_dir, name)) if not l.startswith("#") and l.strip()]
     head = lines[0].split()
     if re.fullmatch(r"[-+.\deE]+", head[0]):
-        raise ValueError(f"{run_dir}/output has no header row: add output:column-headers to the input")
-    data = np.loadtxt(lines[1:], ndmin=2)
+        raise ValueError(f"{run_dir}/{name} has no header row: add output:column-headers to the input")
+    rows = lines[1:]
+    if len(rows) > 1 and len(rows[-1].split()) < len(rows[0].split()):
+        print(f"WARNING: {run_dir}/{name}: last row incomplete (job stopped while writing it): left out")
+        rows = rows[:-1]
+    data = np.loadtxt(rows, ndmin=2)
     return head, data
 
 
@@ -102,12 +211,11 @@ _GRAIN_LEAD = {"time-steps": ["step"], "real-time": ["time"], "temperature": ["t
                "applied-field-strength": ["field"], "applied-field-unit-vector": ["field_ux", "field_uy", "field_uz"]}
 
 
-def read_grain_file(run_dir, n_grains):
-    """Per-frame grain data from grain.txt.
-
-    The columns follow the input's grain:* keywords in order: single columns (step, time, temperature, field) and
-    then blocks per grain, of which grain:magnetisation gives 4 per grain (mx, my, mz direction, |m|).
-    Returns ({name: float64 [frames]} of the columns before the magnetisation block, float32 [frames, grains, 4])."""
+def grain_columns(run_dir, n_grains):
+    """(names of the single columns before the magnetisation block, columns needed) of grain.txt, checked against its
+    first row; ValueError if grain.txt holds no usable grain magnetisation. The columns follow the input's grain:*
+    keywords in order: single columns (step, time, temperature, field) and then blocks per grain, of which
+    grain:magnetisation gives 4 per grain (mx, my, mz direction, |m|)."""
     keys = [k.split(":", 1)[1] for k in Input(run_dir).keys if k.startswith("grain:")]
     names = []
     for k in keys:
@@ -120,11 +228,31 @@ def read_grain_file(run_dir, n_grains):
                              f"known to hamrvis (add it to _GRAIN_LEAD in hamrvis/vampire.py)")
     else:
         raise ValueError("the input has no grain:magnetisation, so grain.txt holds no grain magnetisation")
+    need = len(names) + 4 * n_grains
+    with open(os.path.join(run_dir, "grain.txt"), errors="replace") as f:
+        first = next((l for l in f if l.strip() and not l.startswith("#")), "")
+    if len(first.split()) < need:
+        raise ValueError(f"grain.txt rows have {len(first.split())} columns, but the input's grain keywords and the "
+                         f"{n_grains} grains of grain-coordinates.txt need at least {need}")
+    return names, need
+
+
+def read_grain_file(run_dir, n_grains):
+    """Per-frame grain data from grain.txt (see grain_columns).
+    Returns ({name: float64 [frames]} of the columns before the magnetisation block, float64 [frames, grains, 4])."""
+    names, need = grain_columns(run_dir, n_grains)
     path = os.path.join(run_dir, "grain.txt")
-    cols = list(range(len(names) + 4 * n_grains))
-    d = np.loadtxt(path, comments="#", usecols=cols, ndmin=2, dtype=np.float64)
+    try:
+        d = np.loadtxt(path, comments="#", usecols=range(need), ndmin=2, dtype=np.float64)
+    except ValueError:
+        rows = [l for l in open(path, errors="replace") if l.strip() and not l.startswith("#")]
+        try:   # a job stopped while writing its last row: leave that row out
+            d = np.loadtxt(rows[:-1], usecols=range(need), ndmin=2, dtype=np.float64)
+        except ValueError:
+            raise ValueError("grain.txt has a short or damaged row (a copy caught mid-transfer?)") from None
+        print(f"WARNING: {path}: last row incomplete (job stopped while writing it): left out")
     lead = {n: d[:, i] for i, n in enumerate(names)}
-    m = d[:, len(names):].reshape(len(d), n_grains, 4).astype(np.float32)
+    m = d[:, len(names):].reshape(len(d), n_grains, 4)
     return lead, m
 
 
@@ -172,11 +300,29 @@ def read_coords(path):
             n = int(np.fromfile(f, np.uint64, 1)[0])
             typ = np.fromfile(f, np.int32, n)
             np.fromfile(f, np.int32, n)                     # category
-            xyz = np.fromfile(f, np.float64, 3 * n).reshape(n, 3)
+            xyz = np.fromfile(f, np.float64, 3 * n)
             grain = np.fromfile(f, np.int32, n)
+        if len(typ) != n or len(xyz) != 3 * n:
+            raise IOError(f"{path}: truncated (fewer than its {n} atoms), copy caught mid-transfer?")
+        xyz = xyz.reshape(n, 3)
         return typ, xyz, (grain if len(grain) == n else None)
-    d = np.loadtxt(path, skiprows=1, ndmin=2)
+    d = _text_data(path)
     return d[:, 0].astype(np.int32), d[:, 2:5], (d[:, 5].astype(np.int32) if d.shape[1] > 5 else None)
+
+
+def _text_data(path, cols=None):
+    """Rows of a text config data file (first line: number of rows), checked to be complete."""
+    with open(path) as f:
+        head = f.readline().split()
+        try:
+            n = int(head[0])
+            d = np.loadtxt(f, ndmin=2, usecols=range(cols) if cols else None)
+        except (ValueError, IndexError):
+            d = None
+    if d is None or len(d) != n:
+        got = "unreadable rows" if d is None else f"{len(d)} of {n} rows"
+        raise IOError(f"{path}: truncated or damaged text file ({got}), copy caught mid-transfer?")
+    return d
 
 
 def read_spins(path):
@@ -188,8 +334,7 @@ def read_spins(path):
         if len(s) != 3 * n:
             raise IOError(f"{path}: truncated ({len(s) // 3} of {n} spins), copy caught mid-transfer?")
         return s.reshape(n, 3)
-    s = np.loadtxt(path, skiprows=1, ndmin=2)
-    return s
+    return _text_data(path, 3)
 
 
 def read_window_spins(path):
@@ -301,21 +446,21 @@ class Hamr:
         """segments: all directories of a run continued over several jobs (default: run_dir alone)."""
         inp = Input(run_dir)
         n = inp.num
-        self.dt = n("sim:time-step", 1e-15, "s")
-        self.eq = int(n("sim:equilibration-time-steps", 0, "s"))
-        self.Tmin = n("sim:minimum-temperature", 0.0, "K")
-        self.Tmax = n("sim:maximum-temperature", 0.0, "K")
+        self.dt = n("sim:time-step", 1e-15, "time")
+        self.eq = n("sim:equilibration-time-steps", 0, "int")
+        self.Tmin = n("sim:minimum-temperature", 0.0, "none")
+        self.Tmax = n("sim:maximum-temperature", 0.0, "none")
         # the head field ramps by (Hmax - Hmin) in each bit (src/hamr/field_profiles.cpp), so its plateau is
         # Hmax - Hmin, with VAMPIRE's defaults Hmax = +1 T, Hmin = -1 T (i.e. 2 T) unless the input sets them
-        self.Hmin = n("sim:minimum-applied-field-strength", -1.0, "T")
-        self.Hmax = n("sim:maximum-applied-field-strength", 1.0, "T")
+        self.Hmin = n("sim:minimum-applied-field-strength", -1.0, "field")
+        self.Hmax = n("sim:maximum-applied-field-strength", 1.0, "field")
         self.Hpeak = self.Hmax - self.Hmin
         uv = [float(c) for c in inp.str("sim:applied-field-unit-vector", "0,0,1").split(",")]
         self.field_uz = uv[2] / math.sqrt(sum(c * c for c in uv))
-        self.rise = int(round(n("hamr:field-rise-time", 1e-12, "s") / self.dt))
-        self.fall = int(round(n("hamr:field-fall-time", 1e-12, "s") / self.dt))
+        self.rise = int(round(n("hamr:field-rise-time", 1e-12, "time") / self.dt))
+        self.fall = int(round(n("hamr:field-fall-time", 1e-12, "time") / self.dt))
         self.Lx, self.Ly, self.Lz = (n(f"dimensions:system-size-{a}") for a in "xyz")
-        self.v = n("hamr:head-speed", 30.0, "m/s")                      # m/s = nm/ns
+        self.v = n("hamr:head-speed", 30.0, "velocity")                      # m/s = nm/ns
         self.BL = n("hamr:bit-size", 0.0)
         self.TW = n("hamr:track-size", 0.0)
         self.pad = n("hamr:track-padding", 0.0)
@@ -328,13 +473,13 @@ class Hamr:
         # tracks, bits and sequence as src/hamr/initialize.cpp and bit_sequence.cpp decide them (lengths in A there)
         self.bits_per_track = int(math.floor((self.Lx - 0.1) / self.BL))
         max_tracks = int(math.floor((self.Ly - 0.1 - 2 * self.pad) / self.TW))
-        n_bits = int(n("hamr:number-of-bits", 0, "s"))
+        n_bits = n("hamr:number-of-bits", 0, "int")
         try_tracks = int(round(n_bits / self.bits_per_track)) if self.bits_per_track else 0
         self.n_tracks = try_tracks if try_tracks < max_tracks else max_tracks
         if inp.str("hamr:bit-sequence-type", "user-defined") == "single-tone-predefined" or not inp.has("hamr:bit-sequence"):
             seq = [-1 if i % 2 == 0 else 1 for i in range(n_bits)]
         else:
-            seq = [int(v) for v in re.findall(r"-?\d+", inp.str("hamr:bit-sequence"))]
+            seq = vampire_integers(inp.str("hamr:bit-sequence"))
             seq = seq[:n_bits] if n_bits < len(seq) else seq
         total = self.n_tracks * self.bits_per_track
         self.sequence = (seq + [0] * total)[:total]                    # trimmed, or padded with field-free bits

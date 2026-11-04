@@ -19,7 +19,12 @@ manifest.json
 <run>/dipole_atoms.u16        uint16  [nz, ny, nx]          atoms per dipole cell (0: a field-probe cell in non-magnetic material)
 ```
 
-`<run>` is the run's id (its folder name, made unique), one per tab. Pixels with no magnetic atom (grain boundaries) hold -128 in the int8
+With `--precision 16` the snapshot files are `NNNNNNNN.i16.gz` (int16, x 32767, empty -32768), with `--precision 32`
+`NNNNNNNN.f32.gz` (float32, empty NaN); `snapshots.dtype` says which. With `--grain-precision 32`, `grains.f32`
+(float32, unscaled) replaces `grains.i16` and `grain_series.dtype` is `"f32"`.
+
+`<run>` is the run's id (its folder name, made unique), one per tab. A run without grains (continuous film) has an
+empty grain list and no grain files; the viewer then steps through its snapshots. Pixels with no magnetic atom (grain boundaries) hold -128 in the int8
 arrays. The first array index of `[3, ...]` arrays is the x, y, z component. Row `iy` of a map is y = (iy + 0.5) x
 pitch from the bottom of the film; the viewer flips it for display.
 
@@ -42,11 +47,14 @@ runs: [ {                 in run order (the order the runs started), one per tab
    checks               {column_rounding_max, grain_txt_same_step {n, max_diff},
                          grain_txt_one_step_earlier {n, max_diff, median_diff}}
    source_files         {name: [bytes, mtime]} of input, output, grain.txt, dipole-field.txt
-   grain_series         {frames, lead: ["time", "temperature"]}
-   snapshots            {grid: {pitch_nm, pitch_z_nm, z0_nm, nx, ny, nz, vx, vy}, volume, frames: [{index, time}]}
+   grain_series         {frames, lead: ["time", "temperature"], dtype: "f32" (if not int16), every: N (if thinned)}
+   snapshots            {grid: {pitch_nm, pitch_z_nm, z0_nm, nx, ny, nz, vx, vy}, volume, frames: [{index, time}],
+                         skipped: [indices], dtype: "i16" | "f32" (if not int8)}
+   notes                [text] what was left out and why (no grain-coordinates.txt, unreadable grain.txt)
    hamr (hamr runs)         head model parameters (see docs/analysis.md), including Hpeak, field_uz, rise, fall
    Tc, Tc_source, freeze_lag_nm, analysis {grains: [...], thresholds} (hamr runs)
-   dipole               {nx, ny, nz, cell_nm} (runs that wrote dipole-field.txt)
+   dipole               {nx, ny, nz, cell_nm, cell_nm_xyz [x, y, z] (if the cells are not cubes)}
+                        (runs that wrote dipole-field.txt)
 } ]
 ```
 
@@ -57,7 +65,8 @@ runs: [ {                 in run order (the order the runs started), one per tab
 - The per-layer volume uses twice that pitch in-plane (one site per layer per pixel can be empty in non-cubic
   lattices; 2 x 2 sites never are inside a grain) and one layer per distinct atom z.
 - Dipole cells are gridded by cell ID: VAMPIRE numbers macrocells x-major with z fastest on
-  (L / cells:macro-cell-size + 1) cells per axis. The x, y, z columns of dipole-field.txt are atom centroids, not
+  (L / cell size + 1) cells per axis, the cell size per axis from cells:macro-cell-size or
+  cells:macro-cell-size-x/y/z (the last line wins, as in VAMPIRE; default 10 A). The x, y, z columns of dipole-field.txt are atom centroids, not
   cell centres, so they are not used for gridding.
 
 ## Changing the format

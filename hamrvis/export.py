@@ -34,10 +34,11 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
         if "grain_series" in e:
             gs = e["grain_series"]
             nG, nF, nL = len(e["grains"]["id"]), gs["frames"], len(gs["lead"])
-            g = np.fromfile(os.path.join(sd, "grains.i16"), np.int16).reshape(nF, nG, 4)
+            gname, gtype = ("grains.f32", np.float32) if gs.get("dtype") == "f32" else ("grains.i16", np.int16)
+            g = np.fromfile(os.path.join(sd, gname), gtype).reshape(nF, nG, 4)
             lead = np.fromfile(os.path.join(sd, "grain_lead.f64")).reshape(nF, nL)
             keep = np.unique(np.r_[np.arange(0, nF, grain_step), nF - 1])
-            files[f"{st}/grains.i16"] = g[keep].tobytes()
+            files[f"{st}/{gname}"] = g[keep].tobytes()
             files[f"{st}/grain_lead.f64"] = lead[keep].tobytes()
             gs["frames"] = len(keep)
         if "snapshots" in e:
@@ -45,11 +46,12 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
             fr = [f for i, f in enumerate(fr) if i % snap_step == 0 or i == len(fr) - 1]
             e["snapshots"]["frames"] = fr
             e["snapshots"]["volume"] = e["snapshots"]["volume"] and volume
+            tag = e["snapshots"].get("dtype", "i8")
             for f in fr:
                 for kind in ("top", "vol") if e["snapshots"]["volume"] else ("top",):
-                    p = os.path.join(sd, kind, f"{f['index']:08d}.i8.gz")
+                    p = os.path.join(sd, kind, f"{f['index']:08d}.{tag}.gz")
                     if os.path.exists(p):
-                        files[f"{st}/{kind}/{f['index']:08d}.i8.gz"] = gzip.decompress(open(p, "rb").read())
+                        files[f"{st}/{kind}/{f['index']:08d}.{tag}.gz"] = gzip.decompress(open(p, "rb").read())
     files["manifest.json"] = json.dumps(man, separators=(",", ":")).encode()
     emb = {k: _b64gz(v) for k, v in files.items()}
 
