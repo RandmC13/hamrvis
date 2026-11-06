@@ -1,4 +1,4 @@
-"""Serve the viewer and one bundle on localhost: / is viewer/, /bundle/ is the bundle directory."""
+"""Serve the viewer and one bundle on localhost: / is hamrvis/viewer/, /bundle/ is the bundle directory."""
 import functools
 import http.server
 import io
@@ -7,7 +7,7 @@ import re
 import threading
 import webbrowser
 
-VIEWER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "viewer")
+VIEWER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -19,9 +19,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = path.split("?", 1)[0].split("#", 1)[0]
         if path.startswith("/bundle/"):
             rel = os.path.normpath(path[len("/bundle/"):]).lstrip(os.sep)
-            if rel.startswith(".."):
+            full = os.path.abspath(os.path.join(self.bundle, rel))    # abspath: "C:/..." would replace the bundle on Windows
+            if rel.startswith("..") or not full.startswith(self.bundle + os.sep):
                 return os.path.join(self.bundle, "__outside__")       # 404, never leave the bundle
-            return os.path.join(self.bundle, rel)
+            return full
         return super().translate_path(path)
 
     def send_head(self):

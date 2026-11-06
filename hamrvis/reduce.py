@@ -31,6 +31,7 @@ from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 
+from . import __version__
 from . import runs as rn
 from . import vampire as vp
 
@@ -923,7 +924,7 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
         raise SystemExit(f"no run directories (folders with an 'input' file) in {paths}")
     dirs = [os.path.abspath(d) for r in runs for d in r.dirs]
     # anything that changes the bundle; the same request again carries on from where an interrupted reduce stopped
-    request = dict(version=FORMAT_VERSION, dirs=dirs, every=every, volume=volume, Tc=Tc, name=name, layer_factor=layer_factor,
+    request = dict(version=FORMAT_VERSION, hamrvis_version=__version__, dirs=dirs, every=every, volume=volume, Tc=Tc, name=name, layer_factor=layer_factor,
                    opts={k: v for k, v in opts.items() if k not in ("workers", "mem")},
                    inputs=[[os.path.getsize(f), int(os.path.getmtime(f))] for f in
                            (os.path.join(d, vp.input_name(d)) for d in dirs)])
@@ -932,7 +933,7 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
     if resuming and os.path.exists(mp):
         manifest = json.load(open(mp))
     else:
-        manifest = dict(format="hamrvis-bundle", version=FORMAT_VERSION, created=time.strftime("%Y-%m-%d %H:%M:%S"),
+        manifest = dict(format="hamrvis-bundle", version=FORMAT_VERSION, hamrvis_version=__version__, created=time.strftime("%Y-%m-%d %H:%M:%S"),
                         name=name or os.path.basename(os.path.commonpath(dirs) if len(dirs) > 1 else dirs[0]), runs=[])
     if resuming:
         log(f"carrying on the interrupted reduce in {out}: {len(manifest['runs'])} of {len(runs)} runs were complete")
@@ -955,7 +956,7 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
                  input={k: v for k, (v, u) in inp.keys.items()},
                  input_units={k: u for k, (v, u) in inp.keys.items() if u},
                  dt=inp.num("sim:time-step", 1e-15, "time"), monte_carlo=rn.is_monte_carlo(inp),
-                 size_nm=[inp.num(f"dimensions:system-size-{a}") for a in "xyz"],
+                 size_nm=inp.system_size(),
                  magnetic_types=magnetic_types(run))
         if r.type != "hamr" and last_hamr:
             e["ref"] = last_hamr                       # the write whose bits this run is compared with

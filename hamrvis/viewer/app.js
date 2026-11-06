@@ -1,6 +1,7 @@
 // hamrvis viewer: loads a bundle made by `hamrvis reduce` (docs/bundle-format.md) and draws it.
 // Data comes from bundle/<path> over HTTP (`hamrvis view`) or from window.HV_EMBED (`hamrvis export`).
 "use strict";
+const HAMRVIS_VERSION = "0.9.0"; // same as hamrvis/__init__.py (a test checks)
 
 // ------------------------------------------------------------------------------------------------ bundle access
 const EMB = window.HV_EMBED || null;
@@ -1213,7 +1214,7 @@ function drawScatter(d, an) {
 }
 function drawDetails() {
   const e = cur().e, sec = $("details"), ck = e.checks;
-  const facts = [["source", e.source], ["reduced", S.M.created]];
+  const facts = [["source", e.source], ["reduced", `${S.M.created} with hamrvis ${S.M.hamrvis_version || "older than 0.9"}`], ["viewer", `hamrvis ${HAMRVIS_VERSION}`]];
   const from = e.grain_map && (e.grain_map.from_run || e.grain_map.from_stage);
   if (e.segments && e.segments.length > 1) facts.splice(1, 0, ["continued in", e.segments.slice(1).join(", ")]);
   for (const n of e.notes || []) facts.push(["note", n]);

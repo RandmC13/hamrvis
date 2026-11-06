@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hamrvis"
+description = "Reduce and view VAMPIRE heat-assisted magnetic recording simulations"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "Sam Jenkins" }]
+dependencies = ["numpy>=1.17"]
+dynamic = ["version"]
+
+[project.scripts]
+hamrvis = "hamrvis.__main__:main"
+
+[tool.setuptools]
+packages = ["hamrvis"]
+
+[tool.setuptools.dynamic]
+version = { attr = "hamrvis.__version__" }
+
+[tool.setuptools.package-data]
+hamrvis = ["viewer/*"]

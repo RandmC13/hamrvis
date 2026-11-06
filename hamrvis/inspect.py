@@ -108,9 +108,10 @@ def run_report(r, opts):
         windowed = sum(1 for *_, w in snaps if w)
         spin_bytes = sum(os.path.getsize(f) for _, _, fs, _ in snaps for f in fs if os.path.exists(f))
         xyz = _sample_atoms(cfiles[0])
-        g = red.Grid(inp.num("dimensions:system-size-x"), inp.num("dimensions:system-size-y"), red.axis_stats(xyz),
+        Lx, Ly, Lz = inp.system_size()
+        g = red.Grid(Lx, Ly, red.axis_stats(xyz),
                      None, opts.get("top_max", red.TOP_MAX), opts.get("layer_max", red.LAYER_MAX))
-        g.nz = max(1, int(round(inp.num("dimensions:system-size-z") * 10 / g.pz)))   # first atoms may miss layers
+        g.nz = max(1, int(round(Lz * 10 / g.pz)))   # first atoms may miss layers
         bits = opts.get("precision", 8)
         kept = len(snaps[::opts.get("every", 1)])
         top, vol = 3 * g.nx * g.ny * bits // 8, 3 * g.nz * g.vy * g.vx * bits // 8

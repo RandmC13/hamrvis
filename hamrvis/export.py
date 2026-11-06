@@ -64,7 +64,7 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
                         "<script>window.HV_EMBED=" + json.dumps(emb, separators=(",", ":")) + ";</script>\n"
                         f"<script>\n{script}</script>")
     html = re.sub(r"<title>.*?</title>", f"<title>{man['name']} HAMR Run</title>", html)
-    if embedded_page:   # localhost.ai artifact: the host supplies the document skeleton
+    if embedded_page:   # the host supplies the document skeleton
         html = re.sub(r"<!doctype html>|</?html[^>]*>|</?head>|</?body>|<meta charset[^>]*>|<meta name=\"viewport\"[^>]*>", "", html)
     open(out, "w").write(html)
     mb = os.path.getsize(out) / 1e6

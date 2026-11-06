@@ -10,7 +10,7 @@ import re
 from . import vampire as vp
 
 # Run types, first match wins: (name, tab title, test on the run's Input). Add new kinds of simulation here and
-# give them views in viewer/app.js (TYPES there); a run matching none is "generic".
+# give them views in hamrvis/viewer/app.js (TYPES there); a run matching none is "generic".
 TYPES = [
     ("hamr", "Write", lambda inp: inp.str("sim:program") == "hamr-simulation"),
     ("dipole-read", "Read-back", lambda inp: inp.has("dipole:output-dipole-field")

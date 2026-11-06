@@ -1,6 +1,7 @@
 """hamrvis command line: python3 -m hamrvis {inspect,reduce,view,export} ...  (see README.md)"""
 import argparse
 
+from . import __version__
 from . import reduce as red
 from . import vampire as vp
 
@@ -45,6 +46,7 @@ def _opts(a):
 
 def main():
     ap = argparse.ArgumentParser(prog="hamrvis", description="Reduce and view VAMPIRE HAMR simulations")
+    ap.add_argument("--version", action="version", version=f"hamrvis {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("inspect", help="list the runs found, what each view needs and whether it is there, and the "
                                        "estimated bundle size (reads small files only)")
@@ -71,8 +73,8 @@ def main():
     x.add_argument("--grain-step", type=int, default=4, help="keep every n-th grain frame (default 4)")
     x.add_argument("--snap-step", type=int, default=1, help="keep every n-th spin snapshot (default 1)")
     x.add_argument("--no-volume", action="store_true", help="leave out the per-layer data")
-    x.add_argument("--limit-mb", type=float, default=15.5, help="refuse to write a larger page (localhost.ai: 16 MB)")
-    x.add_argument("--artifact", action="store_true", help="omit the document skeleton (for localhost.ai artifacts)")
+    x.add_argument("--limit-mb", type=float, default=15.5, help="refuse to write a larger page (default suits sites with a 16 MB limit)")
+    x.add_argument("--artifact", action="store_true", help="omit the document skeleton (for hosts that supply their own)")
     a = ap.parse_args()
     if a.cmd in ("reduce", "inspect"):
         vp.NAMES.update(input=a.input_file, output=a.output_file)

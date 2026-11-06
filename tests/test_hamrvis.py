@@ -36,7 +36,7 @@ RUN = os.path.join(HERE, "fixture-run")
 LEADIN = os.path.join(HERE, "fixture-leadin")
 LEADIN_FIXED = os.path.join(HERE, "fixture-leadin-fixed")
 RUN_T0 = os.path.join(HERE, "fixture-t0")    # 0 K time series: snapshot and grain.txt share step 0
-APP = os.path.join(HERE, "..", "viewer", "app.js")
+APP = os.path.join(HERE, "..", "hamrvis", "viewer", "app.js")
 SCEN = os.path.join(HERE, "scenarios")
 
 
@@ -385,6 +385,68 @@ class Bundles(unittest.TestCase):
             self.assertIn(f'"{rid}/output.f64"', html)
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def _run_with_input(self, tmp, edit):
+        """A copy of a write's input with edit(lines) applied, as a run directory."""
+        os.makedirs(tmp, exist_ok=True)
+        lines = open(os.path.join(SCEN, "write-only", "write", "input")).read().split("\n")
+        with open(os.path.join(tmp, "input"), "w") as f:
+            f.write("\n".join(edit(lines)))
+        return tmp
+
+    def test_defaults_are_vampires(self):
+        # sim::Tmax starts at 300 K (src/simulate/sim.cpp): a write that does not set it is heated to 300 K
+        with tempfile.TemporaryDirectory() as tmp:
+            h = vp.Hamr(self._run_with_input(tmp, lambda ls: [l for l in ls if "maximum-temperature" not in l]))
+            self.assertEqual(h.Tmax, 300.0)
+            self.assertEqual(h.Tmin, vp.Hamr(os.path.join(SCEN, "write-only", "write")).Tmin)
+
+    def test_system_size_sets_every_axis(self):
+        # dimensions:system-size sets all three, -x/-y/-z one, the last line wins (src/create/interface.cpp)
+        no_size = lambda ls: [l for l in ls if "system-size" not in l]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(vp.Input(self._run_with_input(tmp, no_size)).system_size(), [10.0, 10.0, 10.0])
+            h = vp.Hamr(self._run_with_input(tmp, lambda ls: no_size(ls) + ["dimensions:system-size = 12 !nm"]))
+            self.assertEqual((h.Lx, h.Ly, h.Lz), (12.0, 12.0, 12.0))
+            h = vp.Hamr(self._run_with_input(tmp, lambda ls: no_size(ls) + ["dimensions:system-size = 12 !nm",
+                                                                            "dimensions:system-size-z = 3 !nm"]))
+            self.assertEqual((h.Lx, h.Ly, h.Lz), (12.0, 12.0, 3.0))
+            h = vp.Hamr(self._run_with_input(tmp, lambda ls: no_size(ls) + ["dimensions:system-size-z = 3 !nm",
+                                                                            "dimensions:system-size = 12 !nm"]))
+            self.assertEqual((h.Lx, h.Ly, h.Lz), (12.0, 12.0, 12.0))
+
+    def test_write_without_bit_or_track_size_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self._run_with_input(tmp, lambda ls: [l for l in ls if "hamr:bit-size" not in l])
+            with self.assertRaisesRegex(ValueError, "hamr:bit-size"):
+                vp.Hamr(run)
+
+    def test_empty_output_table_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self._run_with_input(tmp, lambda ls: ls)
+            with open(os.path.join(run, "output"), "w") as f:
+                f.write("#----\n# Output file for vampire simulation\n")
+            with self.assertRaisesRegex(ValueError, "no rows"):
+                vp.read_output(run)
+
+    def test_server_stays_inside_the_bundle(self):
+        h = serve.Handler.__new__(serve.Handler)
+        with tempfile.TemporaryDirectory() as tmp:
+            h.bundle = os.path.abspath(tmp)
+            self.assertEqual(h.translate_path("/bundle/write/output.f64"), os.path.join(h.bundle, "write", "output.f64"))
+            for bad in ("/bundle/../secret", "/bundle/a/../../secret", "/bundle/" + os.path.abspath(os.sep) + "secret",
+                        "/bundle/C:/secret"):
+                path = h.translate_path(bad)
+                self.assertTrue(path.startswith(h.bundle + os.sep), path)
+                self.assertFalse(os.path.exists(path))
+
+    def test_version_is_the_same_everywhere(self):
+        import hamrvis
+        self.assertIn(f'HAMRVIS_VERSION = "{hamrvis.__version__}"', open(APP).read())
+        self.assertIn(f"version: {hamrvis.__version__}", open(os.path.join(HERE, "..", "CITATION.cff")).read())
+        with tempfile.TemporaryDirectory() as tmp:
+            reduce.reduce([os.path.join(SCEN, "write-only")], tmp + "/b", workers=1)
+            self.assertEqual(json.load(open(tmp + "/b/manifest.json"))["hamrvis_version"], hamrvis.__version__)
+
     def test_viewer_reads_version_1_manifests(self):
         # bundles reduced before the run list keep their three tabs, titles and links (#relax, #write, #read)
         src = open(APP).read()

@@ -143,6 +143,17 @@ class Input:
             raise ValueError(f"{key} = {v} !{unit}: VAMPIRE reads {key} as a {kind}, but '{unit}' is a {got} unit")
         return float(v) * factor / _OUT[kind]
 
+    def system_size(self):
+        """[x, y, z] in nm: dimensions:system-size sets all three, -x/-y/-z one, the last line wins (src/create/interface.cpp);
+        10 nm each unless set (mp::default_system)."""
+        size = [10.0, 10.0, 10.0]
+        for k in self.keys:
+            if k == "dimensions:system-size":
+                size = [self.num(k)] * 3
+            elif k in ("dimensions:system-size-x", "dimensions:system-size-y", "dimensions:system-size-z"):
+                size["xyz".index(k[-1])] = self.num(k)
+        return size
+
 
 def vampire_integers(text):
     """Integer list as VAMPIRE's vin::integers_from_string reads it: comma separated, each field read with
@@ -159,6 +170,8 @@ def read_output(run_dir):
         raise ValueError(f"{run_dir}: no VAMPIRE output table (looked for 'output' and for VAMPIRE's header in the "
                          f"other files; use --output-file NAME)")
     lines = [l for l in open(os.path.join(run_dir, name)) if not l.startswith("#") and l.strip()]
+    if not lines:
+        raise ValueError(f"{run_dir}/{name} has no rows: the run stopped before its first output")
     head = lines[0].split()
     if re.fullmatch(r"[-+.\deE]+", head[0]):
         raise ValueError(f"{run_dir}/{name} has no header row: add output:column-headers to the input")
@@ -486,7 +499,7 @@ class Hamr:
         self.dt = n("sim:time-step", 1e-15, "time")
         self.eq = n("sim:equilibration-time-steps", 0, "int")
         self.Tmin = n("sim:minimum-temperature", 0.0, "none")
-        self.Tmax = n("sim:maximum-temperature", 0.0, "none")
+        self.Tmax = n("sim:maximum-temperature", 300.0, "none")              # defaults as src/simulate/sim.cpp
         # the head field ramps by (Hmax - Hmin) in each bit (src/hamr/field_profiles.cpp), so its plateau is
         # Hmax - Hmin, with VAMPIRE's defaults Hmax = +1 T, Hmin = -1 T (i.e. 2 T) unless the input sets them
         self.Hmin = n("sim:minimum-applied-field-strength", -1.0, "field")
@@ -496,7 +509,7 @@ class Hamr:
         self.field_uz = uv[2] / math.sqrt(sum(c * c for c in uv))
         self.rise = int(round(n("hamr:field-rise-time", 1e-12, "time") / self.dt))
         self.fall = int(round(n("hamr:field-fall-time", 1e-12, "time") / self.dt))
-        self.Lx, self.Ly, self.Lz = (n(f"dimensions:system-size-{a}") for a in "xyz")
+        self.Lx, self.Ly, self.Lz = inp.system_size()
         self.v = n("hamr:head-speed", 30.0, "velocity")                      # m/s = nm/ns
         self.BL = n("hamr:bit-size", 0.0)
         self.TW = n("hamr:track-size", 0.0)
@@ -507,6 +520,8 @@ class Hamr:
         self.box_y = min(n("hamr:head-field-y", 20.0), self.Ly)
         self.sigma_x = self.fwhm_x / math.sqrt(8 * math.log(2))
         self.sigma_y = self.fwhm_y / math.sqrt(8 * math.log(2))
+        if self.BL <= 0 or self.TW <= 0:
+            raise ValueError(f"{run_dir}: a HAMR write needs hamr:bit-size and hamr:track-size in its input")
         # tracks, bits and sequence as src/hamr/initialize.cpp and bit_sequence.cpp decide them (lengths in A there)
         self.bits_per_track = int(math.floor((self.Lx - 0.1) / self.BL))
         max_tracks = int(math.floor((self.Ly - 0.1 - 2 * self.pad) / self.TW))
@@ -581,15 +596,6 @@ class Hamr:
         seq = np.asarray(self.sequence[: self.n_tracks * self.bits_per_track] or [0])
         pol = seq[np.clip(track * self.bits_per_track + b, 0, len(seq) - 1)]
         return np.where(inbit, mag * pol, 0.0)
-
-    def bit_windows(self):
-        """[(first step, last step, polarity)] of every bit, in write order."""
-        res = []
-        for b, pol in enumerate(self.sequence[: self.n_tracks * self.bits_per_track]):
-            t, i = divmod(b, self.bits_per_track)
-            s0 = self.eq + t * self.nt + self.ne + i * self.nb + 1
-            res.append((s0, s0 + self.nb - 1, pol))
-        return res
 
     def track_of(self, y):
         return np.clip(np.floor((np.asarray(y) - self.pad) / self.TW), 0, self.n_tracks - 1).astype(int)

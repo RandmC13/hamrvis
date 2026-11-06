@@ -1,6 +1,6 @@
 # Write analysis and head model
 
-## Head, laser and field (`hamrvis/vampire.py` `Hamr`, ported to the viewer as `Model` in `viewer/app.js`)
+## Head, laser and field (`hamrvis/vampire.py` `Hamr`, ported to the viewer as `Model` in `hamrvis/viewer/app.js`)
 
 From `src/hamr/hamr_continuous.cpp` and `src/hamr/field_profiles.cpp`. Steps count from the start of the run's
 `sim::time` (equilibration included); `k = step - eq`.
