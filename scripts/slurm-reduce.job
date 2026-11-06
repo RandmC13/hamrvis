@@ -15,13 +15,12 @@
 # (for example --no-volume, --every 2, --tc 600). Workers follow the job's CPUs
 # and memory. If the job runs out of time, submit it again with the same
 # arguments: the reduce carries on where it stopped.
-#   PY_MODULE  module providing python3 with numpy (default below)
+#   PY_MODULE  module providing python3 with numpy, if the cluster needs one
 #------------------------------------------------------------------------------
 set -eu
 [ $# -ge 2 ] || { echo "usage: sbatch --account=<project> $0 <runs> <bundle> [options]"; exit 1; }
 runs=$1 bundle=$2; shift 2
-module purge
-module load ${PY_MODULE:-SciPy-bundle/2023.07-gfbf-2023a}
+[ -z "${PY_MODULE:-}" ] || { module purge; module load "$PY_MODULE"; }   # e.g. a module providing Python and numpy
 python3 -c "import sys, numpy; print('python', sys.version.split()[0], 'numpy', numpy.__version__)"
 cd "${SLURM_SUBMIT_DIR:-.}"
 start=$(date +%s)

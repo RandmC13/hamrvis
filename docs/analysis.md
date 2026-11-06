@@ -36,7 +36,7 @@ Per grain, from `grain.txt` (z-magnetisation `m_z |m|`):
 | intended direction | the field direction of the bit the grain lies in, with bit `b` covering `[b BL - lag, (b + 1) BL - lag)` on the nearest track: bits are written a lag behind the laser. The sign is `bit polarity x z-component of the field unit vector`. |
 | written as intended | melted, decided, and its final sign equals the intended direction. |
 
-Known limits (from the earlier earlier runs, still true): a grain's centre temperature is a rough proxy for when it
+Known limits: a grain's centre temperature is a rough proxy for when it
 froze (the Tc front needs ~0.4 ns to cross a grain at 20 m/s); grains near the track edge freeze closer to the
 laser (the Tc isotherm is an ellipse) and can take the previous bit's field; grains deciding during a reversal can
 go either way.

@@ -24,14 +24,14 @@ This gives the `hamrvis` command; `python3 -m hamrvis` from a clone without inst
 
 ## Typical workflow
 
-On cluster, after the runs have finished (`<chain>` is a folder holding one subfolder per run):
+On a Slurm cluster, after the runs have finished (`<chain>` is a folder holding one subfolder per run):
 
 ```bash
 cd ~/hamrvis                        # a clone of this repository
 sbatch --account=<project> scripts/slurm-reduce.job <chain> ~/scratch/bundles/<name>
 ```
 
-On the laptop:
+On your own computer:
 
 ```bash
 rsync -av --info=progress2 <cluster>:scratch/bundles/<name> ~/hamr-bundles/

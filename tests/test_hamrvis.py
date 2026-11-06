@@ -439,6 +439,14 @@ class Bundles(unittest.TestCase):
                 self.assertTrue(path.startswith(h.bundle + os.sep), path)
                 self.assertFalse(os.path.exists(path))
 
+    def test_test_data_has_no_machine_details(self):
+        for root in [SCEN] + [os.path.join(HERE, d) for d in os.listdir(HERE) if d.startswith("fixture-")]:
+            for d, _, files in os.walk(root):
+                for f in files:
+                    if f in ("log", "stdout", "output", "results.txt"):
+                        data = open(os.path.join(d, f), "rb").read()
+                        self.assertNotIn(b"/home/", data, os.path.join(d, f))
+
     def test_version_is_the_same_everywhere(self):
         import hamrvis
         self.assertIn(f'HAMRVIS_VERSION = "{hamrvis.__version__}"', open(APP).read())

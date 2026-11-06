@@ -1,7 +1,7 @@
 28-10-2026 [11:19:49] Logfile opened
 28-10-2026 [11:19:49] Executable : vampire-serial
 28-10-2026 [11:19:49] Host name  : localhost:
-28-10-2026 [11:19:49] Directory  : /home/agent/.localhost/jobs/15183312/tmp/d47/leadin-new
+28-10-2026 [11:19:49] Directory  : /path/to/run
 28-10-2026 [11:19:49] Process ID : 291825
 28-10-2026 [11:19:49] Version    : 7.0.0
 28-10-2026 [11:19:49] Githash    : 

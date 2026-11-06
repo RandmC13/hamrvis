@@ -1,7 +1,7 @@
 27-10-2026 [12:46:50] Logfile opened
 27-10-2026 [12:46:50] Executable : vampire-serial
 27-10-2026 [12:46:50] Host name  : localhost:
-27-10-2026 [12:46:50] Directory  : /home/agent/.localhost/jobs/15183312/tmp/lead
+27-10-2026 [12:46:50] Directory  : /path/to/run
 27-10-2026 [12:46:50] Process ID : 25019
 27-10-2026 [12:46:50] Version    : 7.0.0
 27-10-2026 [12:46:50] Githash    : 08ef9cb0d10d6e11e73ab2b58c3f534ba467ac2d
