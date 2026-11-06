@@ -25,6 +25,7 @@ CASES = {   # bundle name: (scenario, reduce options)
     "text-snapshots": ("text-snapshots", {}), "custom-names": ("custom-names", {}),
     "file-per-process": ("file-per-process", {}), "split-write": ("split-write", {}),
     "p16": ("write-only", dict(precision=16)), "p32": ("write-only", dict(precision=32, grain_precision=32)),
+    "coarse": ("chain", dict(top_max=300, layer_max=800)),     # columns of several sites
 }
 STEP = {"i8": 127, "i16": 32767, "f32": None}
 
@@ -82,19 +83,21 @@ class BundleAgainstRawFiles(unittest.TestCase):
         self.assertGreaterEqual(checked, 7)
 
     def test_snapshot_columns(self):
-        checked = set()
+        checked, coarse = set(), False
         for name, e, d in self.runs():
             if "snapshots" not in e or len(e["segments"]) > 1:
                 continue
             G, tag = e["snapshots"]["grid"], e["snapshots"].get("dtype", "i8")
-            self.assertEqual(G["pitch_nm"], G["atom_pitch_nm"], msg="reference handles single-atom columns only")
             typ, xyz = ref.coordinates(e["source"])
             self.assertTrue(set(np.unique(typ)) <= set(e["magnetic_types"]), msg=name)
             xs = np.unique(np.round(xyz[:, 0], 3))
             self.assertAlmostEqual(G["atom_pitch_nm"] * 10, np.diff(xs).min(), places=3, msg=name)
             for fr in e["snapshots"]["frames"]:
+                factor = int(round(G["pitch_nm"] / G["atom_pitch_nm"]))
+                sites = tuple(int(round(L / G["atom_pitch_nm"])) for L in e["size_nm"][:2])
                 want = ref.column_means(xyz, ref.spins(e["source"], fr["index"]), G["atom_pitch_nm"] * 10,
-                                        G["nx"], G["ny"])
+                                        G["nx"], G["ny"], factor, sites)
+                coarse = coarse or factor > 1
                 raw = gzip.open(os.path.join(d, "top", f"{fr['index']:08d}.{tag}.gz")).read()
                 q = np.frombuffer(raw, {"i8": np.int8, "i16": np.int16, "f32": np.float32}[tag]).reshape(want.shape)
                 empty = np.isnan(want)
@@ -108,6 +111,7 @@ class BundleAgainstRawFiles(unittest.TestCase):
                 checked.add((name, tag))
         self.assertTrue({("p16", "i16"), ("p32", "f32"), ("chain", "i8"), ("file-per-process", "i8"),
                          ("text-snapshots", "i8"), ("continuous", "i8")} <= checked)
+        self.assertTrue(coarse, msg="no coarsened grid was checked")
 
     def test_head_parameters_in_any_units(self):
         for name, e, d in self.runs():

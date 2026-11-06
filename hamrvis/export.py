@@ -35,12 +35,13 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
             gs = e["grain_series"]
             nG, nF, nL = len(e["grains"]["id"]), gs["frames"], len(gs["lead"])
             gname, gtype = ("grains.f32", np.float32) if gs.get("dtype") == "f32" else ("grains.i16", np.int16)
-            g = np.fromfile(os.path.join(sd, gname), gtype).reshape(nF, nG, 4)
+            g = np.memmap(os.path.join(sd, gname), gtype, "r", shape=(nF, nG, 4))
             lead = np.fromfile(os.path.join(sd, "grain_lead.f64")).reshape(nF, nL)
             keep = np.unique(np.r_[np.arange(0, nF, grain_step), nF - 1])
             files[f"{st}/{gname}"] = g[keep].tobytes()
             files[f"{st}/grain_lead.f64"] = lead[keep].tobytes()
             gs["frames"] = len(keep)
+            gs.pop("overview", None)            # the page holds its thinned series whole
         if "snapshots" in e:
             fr = e["snapshots"]["frames"]
             fr = [f for i, f in enumerate(fr) if i % snap_step == 0 or i == len(fr) - 1]

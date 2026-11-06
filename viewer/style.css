@@ -101,6 +101,13 @@ button, select, input { font: inherit; color: inherit; }
 .axis { display: grid; grid-template-columns: var(--gutter) minmax(0, 1fr); }
 .axis canvas { display: block; width: 100%; height: 22px; grid-column: 2; }
 .axis span { font-size: 12px; color: var(--muted); padding-top: 3px; }
+.axis .zoom { display: flex; align-items: flex-start; gap: 2px; }
+.axis .zoom button { margin-left: 2px; width: 18px; height: 17px; padding: 0; line-height: 1; font-size: 12px; color: var(--ink); background: transparent; border: 1px solid var(--rule); border-radius: 3px; cursor: pointer; }
+.axis .zoom button:first-of-type { margin-left: 6px; }
+#mini-row[hidden] { display: none; }
+#minimap { height: 16px; cursor: grab; touch-action: none; border-radius: 3px; }
+.data-error { margin-bottom: 8px; padding: 6px 10px; border: 1px solid var(--bad); border-radius: 4px; color: var(--bad); font-size: 13px; }
+.data-error[hidden] { display: none; }
 .xhair { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--ink); opacity: .55; pointer-events: none; }
 .xhair span {
   position: absolute; bottom: 0; left: 4px; background: var(--ink); color: var(--lane); font-size: 11.5px;

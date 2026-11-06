@@ -37,8 +37,10 @@
 
 <main class="work">
   <div class="main-col">
+    <div class="data-error" id="data-error" role="alert" hidden></div>
     <div class="lanes" id="lanes-top"><div class="xhair" hidden><span></span></div></div>
-    <div class="axis"><span>x (nm)</span><canvas id="axis-top" aria-hidden="true"></canvas></div>
+    <div class="axis"><span class="zoom">x (nm)<button id="zoom-out" aria-label="Zoom out" title="Zoom out (−); pinch or ctrl + wheel on a lane">−</button><button id="zoom-in" aria-label="Zoom in" title="Zoom in (+); pinch or ctrl + wheel on a lane">+</button><button id="zoom-fit" aria-label="Show the whole film" title="Whole film (0)">↔</button></span><canvas id="axis-top" aria-hidden="true"></canvas></div>
+    <div class="axis" id="mini-row" hidden><span><label class="toggle"><input type="checkbox" id="follow"> follow head</label></span><canvas id="minimap" aria-label="Whole film: drag to move the window; shift + drag on a lane also pans"></canvas></div>
     <div class="transport" id="transport">
       <div class="play">
         <button class="step" id="to-start" aria-label="Go to start" title="Start">⏮</button>

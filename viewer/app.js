@@ -21,12 +21,18 @@ async function getBuf(path) {
   const b = await r.arrayBuffer();
   return path.endsWith(".gz") ? gunzip(b) : b;
 }
+async function getRange(path, a, n) {                             // n bytes from byte a (long grain series)
+  const r = await fetch("bundle/" + path, { headers: { Range: `bytes=${a}-${a + n - 1}` } });
+  if (r.status !== 206) throw new Error(`bundle/${path}: HTTP ${r.status} to a byte range request (use hamrvis view)`);
+  return r.arrayBuffer();
+}
 const has = path => EMB ? path in EMB : true;
 async function tryBuf(path) { try { return await getBuf(path); } catch (e) { return null; } }
 
 // ------------------------------------------------------------------------------------------------ state
 const S = { M: null, stage: null, f: 0, fa: 0, view: "grains", colour: "mz", layer: 0, sel: -1, hov: -1, ysec: 0,
-            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, pol: false, hx: null };
+            z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, pol: false, hx: null,
+            win: { x0: 0, x1: 1 }, dspan: 1, y0: 0, follow: true };
 const D = {};                                                    // per-stage data, filled by loadStage
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -101,6 +107,7 @@ function buildLuts() {
   LUT.b = divLut("--b-dn", "--b-mid", "--b-up");
   LUT.s = seqLut(["--s0", "--s1", "--s2", "--s3", "--s4"]);
   LUT.void = hex(css("--void"));
+  LUT.mid = hex(css("--mid"));
 }
 const idxDiv = v => Math.max(0, Math.min(255, Math.round((v + 1) * 127.5)));     // -1..1
 const idxSeq = v => Math.max(0, Math.min(255, Math.round(v * 255)));             // 0..1
@@ -115,11 +122,17 @@ async function loadStage(st) {
   if (e.grain_series) {
     const nF = e.grain_series.frames, nL = e.grain_series.lead.length;
     const gt = e.grain_series.dtype || "i16";                  // grains.i16 (x 1/32767) or grains.f32 (exact)
-    d.g = gt === "f32" ? new Float32Array(await getBuf(`${st}/grains.f32`)) : new Int16Array(await getBuf(`${st}/grains.i16`));
     d.gs = gt === "f32" ? 1 : 32767;
+    if (e.grain_series.overview) {                             // too long to hold: blocks of frames on demand, overview for whole-run views
+      d.g = { blocks: new Map(), T: gt === "f32" ? Float32Array : Int16Array, path: `${st}/grains.${gt}` };
+      d.g.frames = Math.max(1, Math.ceil(16e6 / (d.nG * 4 * d.g.T.BYTES_PER_ELEMENT)));
+      d.ov = new Int16Array(await getBuf(`${st}/grains_overview.i16`));
+      d.ovB = e.grain_series.overview.bins;
+    } else d.g = gt === "f32" ? new Float32Array(await getBuf(`${st}/grains.f32`)) : new Int16Array(await getBuf(`${st}/grains.i16`));
     d.lead = new Float64Array(await getBuf(`${st}/grain_lead.f64`));
     Object.assign(d, { nF, nL });
     d.time = Float64Array.from({ length: nF }, (_, f) => d.lead[f * nL]);
+    if (d.ov) await loadFrame(d, nF - 1);                      // the final state is always wanted
     d.steps = Float64Array.from(d.time, t => Math.round(t / e.dt));
   } else if (e.snapshots && e.snapshots.frames.length > 1) {   // no grain series (e.g. a continuous film): one frame per snapshot
     const fr = e.snapshots.frames;
@@ -154,7 +167,7 @@ function snapArray(d, kind, idx) {
   cache.set(idx, null);
   const [T, sc, empty] = SNAP[d.e.snapshots.dtype || "i8"];
   getBuf(path).then(b => { const a = new T(b); a.S = sc; a.E = empty; cache.set(idx, a); if (cache.size > 80) cache.delete(cache.keys().next().value); redraw(); })
-    .catch(() => cache.set(idx, undefined));
+    .catch(err => { cache.set(idx, undefined); d.err = `snapshot ${idx}: ${err.message}`; redraw(); });
   return null;
 }
 function nearestSnap(d, step) {
@@ -166,8 +179,33 @@ function nearestSnap(d, step) {
 }
 
 // ------------------------------------------------------------------------------------------------ grain helpers
-const gmz = (d, f, g) => { const o = (f * d.nG + g) * 4; return d.g[o + 2] / d.gs * d.g[o + 3] / d.gs; };
-const gml = (d, f, g) => d.g[(f * d.nG + g) * 4 + 3] / d.gs;
+// Long series: a block of frames is fetched when first wanted and values read as NaN until it arrives. drawAll waits for
+// the block of the current frame, so nothing drawn for the current frame is ever a placeholder.
+const MAX_BLOCKS = 32;
+function frameBlock(d, f) {
+  const G = d.g, b = Math.floor(f / G.frames), have = G.blocks.get(b);
+  if (have !== undefined) return have;
+  G.blocks.set(b, null);
+  loadBlock(d, b).then(redraw).catch(err => { d.err = `grain series: ${err.message}`; G.blocks.delete(b); redraw(); });
+  return null;
+}
+async function loadBlock(d, b) {
+  const G = d.g, sz = d.nG * 4 * G.T.BYTES_PER_ELEMENT, n = Math.min(G.frames, d.nF - b * G.frames);
+  const a = new G.T(await getRange(G.path, b * G.frames * sz, n * sz));
+  G.blocks.set(b, a);
+  const pin = Math.floor((d.nF - 1) / G.frames);
+  for (const k of G.blocks.keys()) { if (G.blocks.size <= MAX_BLOCKS) break; if (k !== pin && k !== b && G.blocks.get(k)) G.blocks.delete(k); }
+  return a;
+}
+const loadFrame = (d, f) => loadBlock(d, Math.floor(f / d.g.frames));
+const frameReady = (d, f) => !d.ov || !!frameBlock(d, f);
+function gv(d, f, g, c) {
+  if (!d.ov) return d.g[(f * d.nG + g) * 4 + c];
+  const a = frameBlock(d, f);
+  return a ? a[((f % d.g.frames) * d.nG + g) * 4 + c] : NaN;
+}
+const gmz = (d, f, g) => gv(d, f, g, 2) / d.gs * gv(d, f, g, 3) / d.gs;
+const gml = (d, f, g) => gv(d, f, g, 3) / d.gs;
 function frameAt(d, step) {                                       // last frame at or before step
   let lo = 0, hi = d.nF - 1;
   while (lo < hi) { const m = (lo + hi + 1) >> 1; if (d.steps[m] <= step) lo = m; else hi = m - 1; }
@@ -177,7 +215,8 @@ const _minGrain = {};
 function minGrainM(d, g) {
   if (!_minGrain[d.st]) {
     const a = new Float32Array(d.nG).fill(1);
-    for (let f = 0; f < d.nF; f++) for (let k = 0; k < d.nG; k++) a[k] = Math.min(a[k], gml(d, f, k));
+    if (d.ov) { for (let b = 0; b < d.ovB; b++) for (let k = 0; k < d.nG; k++) a[k] = Math.min(a[k], d.ov[(b * d.nG + k) * 4 + 2] / 32767); }
+    else for (let f = 0; f < d.nF; f++) for (let k = 0; k < d.nG; k++) a[k] = Math.min(a[k], gml(d, f, k));
     _minGrain[d.st] = a;
   }
   return _minGrain[d.st][g];
@@ -222,7 +261,7 @@ function grainColour(d, f, g) {
   if (S.colour === "peak" && d.an) return rgbOf(LUT.s, idxSeq((d.an[g].peakT - e.hamr.Tmin) / (e.hamr.Tmax - e.hamr.Tmin)));
   if (S.colour === "minm" && d.g) return rgbOf(LUT.s, idxSeq(1 - minGrainM(d, g)));
   if (!d.g) return LUT.void;
-  if (S.colour === "agree") { const w = wantOf(d, g); return w ? rgbOf(LUT.agree, idxDiv(gmz(d, f, g) * w)) : hex(css("--mid")); }
+  if (S.colour === "agree") { const w = wantOf(d, g); return w ? rgbOf(LUT.agree, idxDiv(gmz(d, f, g) * w)) : LUT.mid; }
   return rgbOf(LUT.m, idxDiv(gmz(d, f, g)));
 }
 
@@ -236,7 +275,6 @@ function fit(c, h) {
   return { ctx, w, h };
 }
 const off = (w, h) => { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; };
-function blit(ctx, img, w, h, smooth = false) { ctx.imageSmoothingEnabled = smooth; ctx.drawImage(img, 0, 0, w, h); }
 // image of nx x ny pixels from a colour function (y flipped: row 0 is the bottom of the film)
 function pixImage(nx, ny, colour) {
   const c = off(nx, ny), x = c.getContext("2d"), im = x.createImageData(nx, ny);
@@ -247,17 +285,105 @@ function pixImage(nx, ny, colour) {
   x.putImageData(im, 0, 0); return c;
 }
 
+// The part of an nx x ny grid (spanning the film in x) inside the x window and the rows fy0..fy1 (fractions), at no more
+// than twice the screen resolution: canvases stay within the browser's limits on any film.
+function gridImage(nx, ny, colour, fy0, fy1, w, h) {
+  const L = Lx(), r = dpr();
+  const ix0 = Math.max(0, Math.floor(S.win.x0 / L * nx)), ix1 = Math.min(nx, Math.ceil(S.win.x1 / L * nx));
+  const iy0 = Math.max(0, Math.floor(fy0 * ny)), iy1 = Math.min(ny, Math.ceil(fy1 * ny));
+  const stepx = Math.max(1, Math.floor((ix1 - ix0) / (2 * w * r))), stepy = Math.max(1, Math.floor((iy1 - iy0) / (2 * h * r)));
+  const cw = Math.ceil((ix1 - ix0) / stepx), ch = Math.ceil((iy1 - iy0) / stepy);
+  const c = off(cw, ch), x = c.getContext("2d"), im = x.createImageData(cw, ch);
+  for (let jy = 0; jy < ch; jy++) for (let jx = 0; jx < cw; jx++) {
+    const col = colour((iy0 + jy * stepy) * nx + ix0 + jx * stepx), o = ((ch - 1 - jy) * cw + jx) * 4;
+    im.data[o] = col[0]; im.data[o + 1] = col[1]; im.data[o + 2] = col[2]; im.data[o + 3] = 255;
+  }
+  x.putImageData(im, 0, 0);
+  return { c, x0: ix0 / nx * L, x1: Math.min(ix0 + cw * stepx, nx) / nx * L, fy0: iy0 / ny, fy1: Math.min(iy0 + ch * stepy, ny) / ny, win: S.win };
+}
+// draw a gridImage: x from the window, y from the lane's screen positions of its rows
+function putImage(ctx, im, w, yTop, yBot, smooth = false) {
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.drawImage(im.c, X(im.x0, w), yTop, X(im.x1, w) - X(im.x0, w), yBot - yTop);
+}
+
+// ------------------------------------------------------------------------------------------------ film window
+// One x window (S.win, nm) for every lane on the film axis. Lanes on the film show it at the true aspect ratio; a film
+// taller than its lane scrolls in y (S.y0: y at the bottom of the lane), one too flat for its lane is stretched in y.
+const MIN_FILM_PX = 120;
+const span = () => S.win.x1 - S.win.x0;
+const isDefaultWindow = () => S.win.x0 === 0 && S.win.x1 === S.dspan;
+function fitWindow() {                                            // the view a run opens on: all of it if readable
+  const w = $("axis-top").clientWidth || 1000, L = Lx();
+  S.dspan = Math.min(L, w * Ly() / MIN_FILM_PX);
+  S.win = { x0: 0, x1: S.dspan };
+  S.y0 = 0;
+}
+function setWindow(x0, x1) {
+  const L = Lx(), n = Math.min(L, Math.max(x1 - x0, 2 * pixelNm()));
+  x0 = Math.max(0, Math.min(L - n, x0));
+  S.win = { x0, x1: x0 + n };
+  redraw();
+}
+const pixelNm = () => { const d = cur(); return d.grid ? d.grid.pitch_nm : d.e.grain_map ? d.e.grain_map.pitch_nm : 0.25; };
+function zoomAt(x, factor) { setWindow(x - (x - S.win.x0) * factor, x + (S.win.x1 - x) * factor); }
+function filmH(w) {
+  const h = Math.round(w * Ly() / S.dspan);
+  return Ly() > Lx() ? Math.min(h, Math.round(.6 * innerHeight)) : h;
+}
+function filmScale(w, h) {
+  const sx = w / span(), full = Ly() * sx <= h + 1;
+  const sy = full ? h / Ly() : sx, y0 = full ? 0 : Math.max(0, Math.min(Ly() - h / sy, S.y0));
+  return { sx, sy, y0, y1: full ? Ly() : y0 + h / sy, scrolled: !full, py: y => h - (y - y0) * sy };
+}
+function filmImage(V, nx, ny, colour, w, h, smooth) {
+  const im = gridImage(nx, ny, colour, V.y0 / Ly(), V.y1 / Ly(), w, h);
+  im.top = V.scrolled ? V.py(im.fy1 * Ly()) : 0; im.bot = V.scrolled ? V.py(im.fy0 * Ly()) : h; im.smooth = smooth;
+  return im;
+}
+const putFilm = (ctx, im, w) => putImage(ctx, im, w, im.top, im.bot, im.smooth);
+function drawScrollBar(ctx, V, w, h) {                            // where the lane is in a film taller than it
+  if (!V.scrolled) return;
+  const y = h * (1 - V.y1 / Ly()), hh = Math.max(12, h * (V.y1 - V.y0) / Ly());
+  ctx.fillStyle = css("--ink"); ctx.globalAlpha = .55; ctx.fillRect(w - 5, y, 4, hh); ctx.globalAlpha = 1;
+}
+const scrollNote = V => V.scrolled ? `y ${fmt(V.y0, 0)}–${fmt(V.y1, 0)} of ${fmt(Ly(), 0)} nm` : "";
+// keep the head in view while it moves
+function followHead(d) {
+  if (!S.follow || !d.model) return;
+  const h = d.model.head(d.steps[S.f]), w = $("axis-top").clientWidth || 1000, lane = filmH(w);
+  if (!h.on) return;
+  const n = span();
+  if (n < Lx() && (h.x < S.win.x0 + .15 * n || h.x > S.win.x0 + .85 * n)) { const x0 = Math.max(0, Math.min(Lx() - n, h.x - .35 * n)); S.win = { x0, x1: x0 + n }; }
+  const V = filmScale(w, lane);
+  if (V.scrolled && (h.y < V.y0 + .15 * (V.y1 - V.y0) || h.y > V.y1 - .15 * (V.y1 - V.y0))) S.y0 = h.y - .5 * (V.y1 - V.y0);
+}
+function drawMinimap() {
+  const d = cur(), c = $("minimap"), show = span() < Lx() - 1e-9;
+  $("mini-row").hidden = !show;
+  if (!show) return;
+  const { ctx, w, h } = fit(c, 16), L = Lx();
+  ctx.clearRect(0, 0, w, h); ctx.fillStyle = css("--lane"); ctx.fillRect(0, 0, w, h);
+  if (d.model) {
+    const hd = d.model.head(d.steps[S.f]);
+    if (hd.on) { ctx.fillStyle = css("--ink"); ctx.fillRect(hd.x / L * w - 1, 0, 2, h); }
+  }
+  ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.5; ctx.strokeRect(S.win.x0 / L * w + .5, .5, Math.max(3, span() / L * w) - 1, h - 1);
+  $("follow").checked = S.follow;
+  $("follow").parentElement.hidden = !d.model;
+}
+
 // ------------------------------------------------------------------------------------------------ lanes
 let LANES = [];
 const cur = () => D[S.stage];
 const Lx = () => cur().e.size_nm[0], Ly = () => cur().e.size_nm[1];
-const X = (x, w) => x / Lx() * w;
-const XI = (px, w) => px / w * Lx();
+const X = (x, w) => (x - S.win.x0) / span() * w;
+const XI = (px, w) => px / w * span() + S.win.x0;
 
 function filmLane(title) {
   return {
     id: "map", group: "top", title,
-    height: w => Math.round(w * Ly() / Lx()),
+    height: filmH, scroll: true,
     draw: drawFilm,
     hover: filmTip,
     click(x, y) { const g = grainAt(x, y); S.sel = g === S.sel ? -1 : g; S.ysec = y; redraw(); },   // clicking the selected grain deselects it
@@ -268,33 +394,39 @@ function filmLane(title) {
 const dragSection = (x, y) => { S.ysec = Math.min(Ly(), Math.max(0, y)); };   // section line follows a held mouse button
 let _lastPix = null;
 function drawFilm(ctx, w, h) {
-  const d = cur(), e = d.e, sx = w / e.size_nm[0], sy = h / e.size_nm[1], M = e.grain_map;
+  const d = cur(), e = d.e, V = filmScale(w, h), sx = V.sx, sy = V.sy, M = e.grain_map;
   ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
-  const view = d.snaps ? S.view : "grains";
+  const view = d.snaps ? S.view : "grains", world = () => { ctx.save(); ctx.translate(-S.win.x0 * sx, V.y0 * sy); };
   let note = "";
   if (view === "grains") {
     if (M) {
       const pal = Array.from({ length: d.nG }, (_, g) => grainColour(d, S.f, g));
-      blit(ctx, pixImage(M.nx, M.ny, i => d.gmap[i] < 0 ? LUT.void : pal[d.gmap[i]]), w, h);
+      putFilm(ctx, filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? LUT.void : pal[d.gmap[i]], w, h), w);
     } else if (e.grains.outline) {   // no atom coordinates in the bundle: VAMPIRE's Voronoi outlines (approximate)
+      world();
       e.grains.outline.forEach((o, g) => { if (!o) return; const c = grainColour(d, S.f, g); ctx.fillStyle = `rgb(${c})`; ctx.beginPath();
         o.forEach(([x, y], i) => i ? ctx.lineTo(x * sx, h - y * sy) : ctx.moveTo(x * sx, h - y * sy)); ctx.fill(); });
+      ctx.restore();
       note = "approximate Voronoi outlines (no atom coordinates)";
     }
   } else {
-    let img = pixelImage(d, view);
+    let img = pixelImage(d, view, V, w, h);
     const key = `${d.st}|${view}|${S.colour}|${S.layer}`;
     if (img) _lastPix = { img, key };
     else if (_lastPix && _lastPix.key === key) img = _lastPix.img;   // next snapshot still loading: no blank frame
-    if (img) blit(ctx, img, w, h);
+    if (img) putFilm(ctx, img, w);
     const s = nearestSnap(d, d.steps[S.f]);
     if (s) note = snapLabel(d, s);
   }
+  // overlays below are in film coordinates: x * sx, h - y * sy
+  world();
+  const fw = Lx() * sx;
   // hovered and selected grain outlines, from the atom map
   if (M) for (const [g, col, lw] of [[S.hov, "--muted", 1], [S.sel, "--ink", 1]]) {
     if (g < 0) continue;
-    ctx.fillStyle = css(col); const pw = w / M.nx * (lw + .2), ph = h / M.ny * (lw + .2);
-    for (const i of grainEdge(d, g)) ctx.fillRect((i % M.nx) * w / M.nx, h - (Math.floor(i / M.nx) + 1) * h / M.ny, pw, ph);
+    const cw = fw / M.nx, ch = Ly() * sy / M.ny;
+    ctx.fillStyle = css(col); const pw = Math.max(cw * (lw + .2), cw < 1 ? 1 : 0), ph = Math.max(ch * (lw + .2), ch < 1 ? 1 : 0);
+    for (const i of grainEdge(d, g)) ctx.fillRect((i % M.nx) * cw, h - (Math.floor(i / M.nx) + 1) * ch, pw, ph);
   }
   else if (e.grains.outline) for (const [g, col, lw] of [[S.hov, "--muted", 1.2], [S.sel, "--ink", 2]]) {   // Voronoi fallback
     const o = g >= 0 && e.grains.outline[g]; if (!o) continue;
@@ -302,11 +434,13 @@ function drawFilm(ctx, w, h) {
     haloStroke(ctx, css(col), lw);
   }
   ctx.setLineDash([5, 4]); ctx.lineWidth = 1; ctx.strokeStyle = css("--ink"); ctx.globalAlpha = .5;
-  const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(w, yl); ctx.stroke();
+  const yl = h - S.ysec * sy; ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(fw, yl); ctx.stroke();
   ctx.setLineDash([]); ctx.globalAlpha = 1;
   if (S.cells && cellGeom(d)) note = [note, drawCells(ctx, sx, sy, h)].filter(Boolean).join("; ");
   if (d.model) drawHead(ctx, d, sx, sy, h);
-  if (e.dipole) drawReaderBand(ctx, w, h, sy);
+  if (e.dipole) drawReaderBand(ctx, fw, h, sy);
+  ctx.restore();
+  drawScrollBar(ctx, V, w, h);
   if (view !== "grains") {   // atom views show the nearest snapshot: say so on the image when it is not this time
     const s = nearestSnap(d, d.steps[S.f]);
     if (s && Math.abs(s.step - d.steps[S.f]) * e.dt > 1e-13) {
@@ -316,7 +450,7 @@ function drawFilm(ctx, w, h) {
       ctx.fillStyle = css("--lane"); ctx.textAlign = "left"; ctx.fillText(txt, 12, h - 12);
     }
   }
-  setNote("map", [note, `section y ${fmt(S.ysec)} nm`]);
+  setNote("map", [note, `section y ${fmt(S.ysec)} nm`, scrollNote(V)]);
 }
 // bit cells: each bit's region (shifted upstream by the freeze lag) on every track; the band hotter than Tc
 function cellGeom(d = cur()) {
@@ -416,28 +550,28 @@ function drawReaderBand(ctx, w, h, sy) {
 }
 
 // pixel images (atom columns or one layer) at data resolution
-function pixelImage(d, view) {
+function pixelImage(d, view, V, w, h) {
   const G = d.grid, vc = LUT.void;
   if (S.colour === "peak" && d.model) {
     const p = d.model.p;
-    return pixImage(G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq((d.model.peakT((i % G.nx + .5) * G.pitch_nm, (Math.floor(i / G.nx) + .5) * G.pitch_nm) - p.Tmin) / (p.Tmax - p.Tmin))) : vc);
+    return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq((d.model.peakT((i % G.nx + .5) * G.pitch_nm, (Math.floor(i / G.nx) + .5) * G.pitch_nm) - p.Tmin) / (p.Tmax - p.Tmin))) : vc, w, h);
   }
-  if (S.colour === "minm") return pixImage(G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq(1 - d.minm[i] / 255)) : vc);
+  if (S.colour === "minm") return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq(1 - d.minm[i] / 255)) : vc, w, h);
   const s = nearestSnap(d, d.steps[S.f]);
   if (!s) return null;
   const agree = S.colour === "agree" && d.gmap;
   const col = (v, i) => {
     if (v !== v) return vc;
-    if (agree) { const g = d.gmap[i], w = g >= 0 ? wantOf(d, g) : 0; return w ? rgbOf(LUT.agree, idxDiv(v * w)) : hex(css("--mid")); }
+    if (agree) { const g = d.gmap[i], w = g >= 0 ? wantOf(d, g) : 0; return w ? rgbOf(LUT.agree, idxDiv(v * w)) : LUT.mid; }
     return rgbOf(LUT.m, idxDiv(v));
   };
   if (view === "atoms") {
     const a = snapArray(d, "top", s.index); if (!a) return null;
-    return pixImage(G.nx, G.ny, i => col(snapVal(a, 2 * G.nx * G.ny + i), i));
+    return filmImage(V, G.nx, G.ny, i => col(snapVal(a, 2 * G.nx * G.ny + i), i), w, h);
   }
   const a = snapArray(d, "vol", s.index); if (!a) return null;
   const n = G.vx * G.vy, o = 2 * G.nz * n + S.layer * n, r = lp(G) / G.pitch_nm;
-  return pixImage(G.vx, G.vy, i => col(snapVal(a, o + i), Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))));
+  return filmImage(V, G.vx, G.vy, i => col(snapVal(a, o + i), Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))), w, h);
 }
 const lp = G => G.layer_pitch_nm || 2 * G.pitch_nm;
 function snapLabel(d, s) {
@@ -479,22 +613,22 @@ const outcome = a => a.category === "unheated" || a.category === "undecided" || 
 function xzLane() {
   return {
     id: "xz", group: "bottom", title: "x–z section",
-    height: w => { const G = cur().grid; return Math.max(40, Math.round(w * G.nz * G.pitch_z_nm / Lx() * 2)); },
+    height: w => { const G = cur().grid; return Math.max(40, Math.round(w * G.nz * G.pitch_z_nm / S.dspan * 2)); },
     draw(ctx, w, h) {
       const d = cur(), G = d.grid;
       ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
       const s = nearestSnap(d, d.steps[S.f]), a = s ? snapArray(d, "vol", s.index) : null;
       if (!a) {   // still loading: keep showing the last section drawn instead of a blank frame
-        if (this._last && this._last.st === d.st) { blit(ctx, this._last.img, w, h); setNote("xz", [`y ${fmt(S.ysec)} nm`, snapLabel(d, this._last.s), "loading next snapshot"]); }
+        if (this._last && this._last.st === d.st) { putImage(ctx, this._last.img, w, 0, h); setNote("xz", [`y ${fmt(S.ysec)} nm`, snapLabel(d, this._last.s), "loading next snapshot"]); }
         else setNote("xz", [s ? "loading" : "no snapshot"]);
         return;
       }
       const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / lp(G))));
-      const img = pixImage(G.vx, G.nz, i => { const v = snapVal(a, 2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx));
-        return v !== v ? LUT.void : rgbOf(LUT.m, idxDiv(v)); });
-      blit(ctx, img, w, h);
+      const img = gridImage(G.vx, G.nz, i => { const v = snapVal(a, 2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx));
+        return v !== v ? LUT.void : rgbOf(LUT.m, idxDiv(v)); }, 0, 1, w, h);
+      putImage(ctx, img, w, 0, h);
       this._last = { img, s, st: d.st };
-      setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×2`, snapLabel(d, s)]);
+      setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×${+(h / (G.nz * G.pitch_z_nm) / (w / span())).toFixed(1)}`, snapLabel(d, s)]);
     },
     hover(x, y, ev, h) { return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((1 - y / h) * cur().grid.nz * cur().grid.pitch_z_nm)} nm`]]); },
     yMode: "px",
@@ -506,21 +640,35 @@ const trackOfSection = p => Math.min(p.n_tracks - 1, Math.max(0, Math.floor((S.y
 // one row per track, stacked as on the film (last track on top)
 function bitsLane() {
   const head = p => p.n_tracks > 1 ? 13 : 0, row = p => 40 + head(p);   // multi-track rows get a label line
-  const rowTrack = (p, py) => Math.min(p.n_tracks - 1, Math.max(0, p.n_tracks - 1 - Math.floor(py / row(p))));
-  const bitGrains = (d, t, b) => { const gs = []; d.an.forEach((a, g) => { if (a.track === t && a.bit === b && melted(a)) gs.push(g); }); return gs; };
+  const MAX_ROWS = 8, shown = p => p.n_tracks > MAX_ROWS ? 4 : p.n_tracks;   // more tracks: 4 around the head or the section line
+  const firstTrack = (d, p) => {
+    if (p.n_tracks <= MAX_ROWS) return 0;
+    const hd = d.model.head(d.steps[S.f]), t = hd.on ? hd.track : trackOfSection(p);
+    return Math.max(0, Math.min(p.n_tracks - shown(p), t - 1));
+  };
+  const rowTrack = (d, p, py) => firstTrack(d, p) + Math.min(shown(p) - 1, Math.max(0, shown(p) - 1 - Math.floor(py / row(p))));
+  const bitIndex = d => {                                               // melted grains of each bit
+    if (d.bitIdx) return d.bitIdx;
+    d.bitIdx = new Map();
+    d.an.forEach((a, g) => { if (melted(a)) { const k = a.track * d.model.p.bits_per_track + a.bit; if (!d.bitIdx.has(k)) d.bitIdx.set(k, []); d.bitIdx.get(k).push(g); } });
+    return d.bitIdx;
+  };
+  const bitGrains = (d, t, b) => bitIndex(d).get(t * d.model.p.bits_per_track + b) || [];
   // written once one of its grains has frozen: before that a grain "agrees" only because of the starting state
   const written = (d, f, gs) => f === d.nF - 1 || gs.some(g => d.an[g].decision_step != null && d.an[g].decision_step <= d.steps[f]);
   return {
     id: "bits", group: "top", title: "Bits", yMode: "px",
-    height: () => row(cur().model.p) * cur().model.p.n_tracks,
+    height: () => row(cur().model.p) * shown(cur().model.p),
     draw(ctx, w, h) {
       const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, bt = d.model.bit(d.steps[S.f]), f = S.f;
       ctx.clearRect(0, 0, w, h);
       ctx.font = `600 11.5px ${css("--font")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      for (let t = 0; t < p.n_tracks; t++) {
-        const y0 = (p.n_tracks - 1 - t) * row(p) + head(p);
+      const t0 = firstTrack(d, p);
+      for (let t = t0; t < t0 + shown(p); t++) {
+        const y0 = (shown(p) - 1 - (t - t0)) * row(p) + head(p);
         for (let b = 0; b < p.bits_per_track; b++) {
           const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), x0 = X(b * p.BL - lag, w), x1 = X((b + 1) * p.BL - lag, w);
+          if (x1 < 0 || x0 > w) continue;
           ctx.fillStyle = want ? rgb(LUT.m, idxDiv(want * .45)) : css("--rule"); ctx.fillRect(x0 + .5, y0 + 2, x1 - x0 - 1, 18);
           const gs = bitGrains(d, t, b), ok = gs.filter(g => okAt(d, f, d.an[g], g)).length;
           if (gs.length && written(d, f, gs)) {
@@ -532,7 +680,7 @@ function bitsLane() {
             ctx.fillStyle = css("--rule"); ctx.fillRect(x0 + .5, y0 + 24, x1 - x0 - 1, 4);
             if (x1 - x0 > 26) { ctx.globalAlpha = .45; ctx.fillStyle = css("--muted"); ctx.fillText(`${ok}/${gs.length}`, (x0 + x1) / 2, y0 + 35); ctx.globalAlpha = 1; }
           }
-          ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : want < 0 ? "↓" : "0", (x0 + x1) / 2, y0 + 11);
+          if (x1 - x0 > 9) { ctx.fillStyle = css("--ink"); ctx.fillText(want > 0 ? "↑" : want < 0 ? "↓" : "0", (x0 + x1) / 2, y0 + 11); }
         }
         if (bt && bt[0] === t) { ctx.strokeStyle = css("--ink"); ctx.lineWidth = 2; ctx.strokeRect(X(bt[1] * p.BL - lag, w) + 1, y0 + 1, X(p.BL, w) - 2, 20); }
         if (p.n_tracks > 1) {
@@ -541,10 +689,10 @@ function bitsLane() {
           ctx.fillStyle = css(bt && bt[0] === t ? "--ink" : "--muted"); ctx.fillText(bt && bt[0] === t ? `${label} · writing` : label, 4, y0 - 6); ctx.restore();
         }
       }
-      setNote("bits", [p.n_tracks > 1 ? `${p.n_tracks} tracks, as on the film; box: bit under the head` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`, "grey: not yet written"]);
+      setNote("bits", [p.n_tracks > MAX_ROWS ? `tracks ${t0 + 1}–${t0 + shown(p)} of ${p.n_tracks}` : "", p.n_tracks > 1 ? `${p.n_tracks} tracks, as on the film; box: bit under the head` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`, "grey: not yet written"]);
     },
     hover(x, py) {
-      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = rowTrack(p, py), b = Math.floor((x + lag) / p.BL);
+      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = rowTrack(d, p, py), b = Math.floor((x + lag) / p.BL);
       if (b < 0 || b >= p.bits_per_track) return "";
       const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), gs = bitGrains(d, t, b);
       return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], ["intended", want > 0 ? "up (+z)" : want < 0 ? "down (−z)" : "no field"],
@@ -563,23 +711,24 @@ function bScale(arr) {
   const v = Array.from(arr).filter(isFinite).map(Math.abs).sort((a, b) => a - b);
   return v[Math.floor(v.length * .995)] || 1e-3;
 }
-function fieldImage(P, nrows, val, sc) {
-  return pixImage(P.nx - 1, nrows, i => rgbOf(LUT.b, idxDiv(val(Math.floor(i / (P.nx - 1)), i % (P.nx - 1)) / sc)));
-}
+const fieldColour = (P, val, sc) => i => rgbOf(LUT.b, idxDiv(val(Math.floor(i / (P.nx - 1)), i % (P.nx - 1)) / sc));
 function sensorLane() {
   return {
     id: "bmap", group: "bottom", title: "Stray B<sub>z</sub>",
-    height: w => Math.round(w * Ly() / Lx()),
+    height: filmH, scroll: true,
     draw(ctx, w, h) {
-      const d = cur(), P = d.e.dipole, Bz = dipoleLayer(d, S.z), sc = bScale(Bz);
-      blit(ctx, fieldImage(P, P.ny - 1, (iy, ix) => Bz[iy * P.nx + ix], sc), w, h, true);
+      const d = cur(), P = d.e.dipole, Bz = dipoleLayer(d, S.z), sc = bScale(Bz), V = filmScale(w, h);
+      putFilm(ctx, filmImage(V, P.nx - 1, P.ny - 1, fieldColour(P, (iy, ix) => Bz[iy * P.nx + ix], sc), w, h, true), w);
       if (d.gmap) {   // grain boundaries (pixels without magnetic atoms) for orientation
-        const M = d.e.grain_map, c = pixImage(M.nx, M.ny, i => d.gmap[i] < 0 ? [0, 0, 0] : [255, 255, 255]);
-        ctx.globalCompositeOperation = "multiply"; ctx.globalAlpha = .18; blit(ctx, c, w, h); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+        const M = d.e.grain_map, c = filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? [0, 0, 0] : [255, 255, 255], w, h);
+        ctx.globalCompositeOperation = "multiply"; ctx.globalAlpha = .18; putFilm(ctx, c, w); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
       }
-      drawReaderBand(ctx, w, h, h / Ly());
+      ctx.save(); ctx.translate(-S.win.x0 * V.sx, V.y0 * V.sy);
+      drawReaderBand(ctx, Lx() * V.sx, h, V.sy);
+      ctx.restore();
+      drawScrollBar(ctx, V, w, h);
       d.bscale = sc;
-      setNote("bmap", [`z ${zText(S.z)}`, `±${fmt(sc * 1e3, 0)} mT (99.5 %)`]);
+      setNote("bmap", [`z ${zText(S.z)}`, `±${fmt(sc * 1e3, 0)} mT (99.5 %)`, scrollNote(V)]);
     },
     hover(x, y) {
       const d = cur(), P = d.e.dipole, ix = Math.floor(x / cellNm(P, 0)), iy = Math.floor(y / cellNm(P, 1)), n = P.nx * P.ny;
@@ -595,15 +744,15 @@ const zText = iz => `${fmt((iz + .5) * cellNm(cur().e.dipole, 2), 1)} nm`;
 function bxzLane() {
   return {
     id: "bxz", group: "bottom", title: "B<sub>z</sub> x–z",
-    height: w => Math.round(w * cur().e.size_nm[2] / Lx() * 2),
+    height: w => Math.round(w * cur().e.size_nm[2] / S.dspan * 2),
     draw(ctx, w, h) {
       const d = cur(), P = d.e.dipole, n = P.nx * P.ny, iy = Math.min(P.ny - 1, Math.floor(S.ysec / cellNm(P, 1)));
-      blit(ctx, fieldImage(P, P.nz - 1, (iz, ix) => d.B[2 * P.nz * n + iz * n + iy * P.nx + ix], d.bscale || .05), w, h, true);
+      putImage(ctx, gridImage(P.nx - 1, P.nz - 1, fieldColour(P, (iz, ix) => d.B[2 * P.nz * n + iz * n + iy * P.nx + ix], d.bscale || .05), 0, 1, w, h), w, 0, h, true);
       const yz = z => h - z / cur().e.size_nm[2] * h;
       ctx.strokeStyle = css("--ink"); ctx.setLineDash([4, 3]); ctx.globalAlpha = .6;
       for (const z of [10, (S.z + .5) * cellNm(P, 2)]) { ctx.beginPath(); ctx.moveTo(0, yz(z)); ctx.lineTo(w, yz(z)); ctx.stroke(); }
       ctx.setLineDash([]); ctx.globalAlpha = 1;
-      setNote("bxz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(d.e.size_nm[2], 0)} nm, ×2`]);
+      setNote("bxz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(d.e.size_nm[2], 0)} nm, ×${+(h / d.e.size_nm[2] / (w / span())).toFixed(1)}`]);
     },
     hover(x, y, ev, h) { return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((1 - y / h) * cur().e.size_nm[2])} nm`]]); },
     yMode: "px",
@@ -662,9 +811,29 @@ function buildLanes() {
     $("lanes-" + L.group).appendChild(el);
     L.canvas = el.querySelector("canvas");
     const pos = ev => { const r = L.canvas.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top, r.width, r.height]; };
-    const xy = ev => { const [px, py, w, h] = pos(ev); return [XI(px, w), L.yMode ? py : (1 - py / h) * Ly(), h]; };
+    const xy = ev => { const [px, py, w, h] = pos(ev), V = filmScale(w, h); return [XI(px, w), L.yMode ? py : V.scrolled ? (h - py) / V.sy + V.y0 : (1 - py / h) * Ly(), h]; };
+    let pan = null;                                                // shift + drag pans the window
+    L.canvas.addEventListener("pointerdown", ev => { if (ev.shiftKey) { pan = { x: ev.clientX, y: ev.clientY, x0: S.win.x0, y0: S.y0 }; S.follow = false; L.canvas.setPointerCapture(ev.pointerId); } });
+    L.canvas.addEventListener("pointerup", () => { pan = null; });
+    L.canvas.addEventListener("wheel", ev => {
+      const [px, , w, h] = pos(ev), V = filmScale(w, h);
+      if (ev.ctrlKey) { ev.preventDefault(); S.follow = false; zoomAt(XI(px, w), Math.exp(ev.deltaY * .004)); return; }   // pinch, or ctrl + wheel
+      if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) { if (span() < Lx()) { ev.preventDefault(); S.follow = false; setWindow(S.win.x0 + ev.deltaX * span() / w, S.win.x1 + ev.deltaX * span() / w); } return; }
+      if (L.scroll && V.scrolled) {                                // scroll the film inside the lane; at its ends the page scrolls
+        const y = Math.max(0, Math.min(Ly() - (V.y1 - V.y0), V.y0 - ev.deltaY / V.sy));
+        if (y !== V.y0) { ev.preventDefault(); S.follow = false; S.y0 = y; redraw(); }
+      }
+    }, { passive: false });
     L.canvas.addEventListener("mousemove", ev => {
       const [x, y, h] = xy(ev);
+      if (pan) {
+        const r = L.canvas.getBoundingClientRect(), n = span(), k = n / r.width;
+        setWindow(pan.x0 - (ev.clientX - pan.x) * k, pan.x0 - (ev.clientX - pan.x) * k + n);
+        const V = filmScale(r.width, r.height);
+        S.y0 = Math.max(0, Math.min(Ly() - (V.y1 - V.y0), pan.y0 + (ev.clientY - pan.y) / V.sy));
+        L.dragged = true;
+        return;
+      }
       if (L.drag && ev.buttons & 1) { L.dragged = true; L.drag(x, y); }
       S.tip = () => showTip(ev, L.hover ? L.hover(x, y, ev, h) : "");   // re-run by drawAll so the tip follows the timeline
       S.hx = x; placeXhair(ev.clientX); redraw();
@@ -686,18 +855,39 @@ function placeXhair(clientX) {
 // ------------------------------------------------------------------------------------------------ drawing
 let _raf = 0;
 function redraw() { if (!_raf) _raf = requestAnimationFrame(() => { _raf = 0; drawAll(); }); }
+// a lane that cannot draw says why instead of staying blank; the others still draw
+function laneError(L, ctx, w, h, err) {
+  console.error(err);
+  ctx.setTransform(dpr(), 0, 0, dpr(), 0, 0);
+  ctx.fillStyle = css("--lane"); ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = css("--bad"); ctx.font = `600 13px ${css("--font")}`; ctx.textAlign = "left";
+  ctx.fillText(`This lane could not be drawn: ${err.message}`, 10, Math.min(20, h - 4));
+  setNote(L.id, ["See the browser console for details"]);
+}
 function drawAll() {
-  for (const L of LANES) { const w = L.canvas.clientWidth; const { ctx, h } = fit(L.canvas, L.height(w)); L.draw(ctx, w, h); }
+  const d = cur();
+  if (d.err) { $("data-error").hidden = false; $("data-error").textContent = `Part of the data could not be read: ${d.err}`; }
+  else $("data-error").hidden = true;
+  if (!frameReady(d, S.f)) { drawScrub(); drawClock(); return; }   // its block arrives shortly and redraws: keep the last picture
+  followHead(d);
+  for (const L of LANES) {
+    const w = L.canvas.clientWidth; let g = null;
+    if (!w) continue;                                              // not laid out yet
+    try { g = fit(L.canvas, L.height(w)); L.draw(g.ctx, w, g.h); }
+    catch (err) { if (g) laneError(L, g.ctx, w, g.h, err); else console.error(err); }
+  }
+  drawMinimap();
   drawAxis("axis-top"); if (!$("lanes-bottom").hidden) drawAxis("axis-bottom");
   drawScrub(); drawClock(); drawSt(); drawInspector();
   if (S.tip) S.tip();
 }
 function drawAxis(id) {
-  const c = $(id), { ctx, w, h } = fit(c, 20), L = Lx();
+  const c = $(id), { ctx, w, h } = fit(c, 20), n = span();
   ctx.clearRect(0, 0, w, h); ctx.fillStyle = css("--muted"); ctx.strokeStyle = css("--rule"); ctx.font = `500 11px ${css("--font")}`;
-  const step = [5, 10, 20, 25, 50, 100, 200].find(s => w / (L / s) > 44) || 500;
+  const steps = n < Lx() - 1e-9 ? [.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000] : [5, 10, 20, 25, 50, 100, 200];
+  const step = steps.find(s => w / (n / s) > 44) || (n > 1e4 ? 2000 : 500);
   ctx.textAlign = "center";
-  for (let x = 0; x <= L + 1e-9; x += step) { const px = X(x, w); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, 4); ctx.stroke(); ctx.fillText(x, Math.min(Math.max(px, 8), w - 12), 14); }
+  for (let i = Math.ceil(S.win.x0 / step); i * step <= S.win.x1 + 1e-9; i++) { const x = +(i * step).toFixed(3), px = X(x, w); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, 4); ctx.stroke(); ctx.fillText(x, Math.min(Math.max(px, 8), w - 12), 14); }
 }
 function timeText(d, t) {
   if (d.e.monte_carlo) return `MC step ${Math.round(t / d.e.dt).toLocaleString()}`;
@@ -715,6 +905,7 @@ function drawClock() {
   el.innerHTML = parts.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join("");
 }
 
+const SCRUB_ALL_ROWS = 16384;
 // scrubber: system magnetisation under a draggable cursor, bit windows shaded
 function drawScrub() {
   const d = cur(), c = $("scrub");
@@ -738,10 +929,18 @@ function drawScrub() {
     if (iz >= 0) series.push({ v: r => d.out[r * nc + iz] * (il >= 0 ? d.out[r * nc + il] : 1), col: css("--ink"), lo: -1, hi: 1 });
     for (const s of series) {
       ctx.strokeStyle = s.col; ctx.lineWidth = 1.5; ctx.beginPath();
-      const stepR = Math.max(1, Math.floor(rows / (w * 2)));
-      for (let r = 0; r < rows; r += stepR) {
-        const t = tcol >= 0 ? d.out[r * nc + tcol] : r / rows * t1, yy = h - 3 - (s.v(r) - s.lo) / (s.hi - s.lo) * (h - 6);
-        r ? ctx.lineTo(t / t1 * w, yy) : ctx.moveTo(t / t1 * w, yy);
+      const yOf = v => h - 3 - (v - s.lo) / (s.hi - s.lo) * (h - 6), tOf = r => tcol >= 0 ? d.out[r * nc + tcol] : r / rows * t1;
+      if (rows <= SCRUB_ALL_ROWS) {
+        const stepR = Math.max(1, Math.floor(rows / (w * 2)));
+        for (let r = 0; r < rows; r += stepR) {
+          const yy = yOf(s.v(r));
+          r ? ctx.lineTo(tOf(r) / t1 * w, yy) : ctx.moveTo(tOf(r) / t1 * w, yy);
+        }
+      } else {     // lowest and highest value in each pixel column, so a short event in a long run stays visible
+        const lo = new Float64Array(Math.ceil(w) + 1).fill(Infinity), hi = new Float64Array(Math.ceil(w) + 1).fill(-Infinity);
+        for (let r = 0; r < rows; r++) { const k = Math.max(0, Math.min(lo.length - 1, Math.floor(tOf(r) / t1 * w))), v = s.v(r); if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+        let first = true;
+        for (let k = 0; k < lo.length; k++) if (hi[k] >= lo[k]) { first ? ctx.moveTo(k + .5, yOf(lo[k])) : ctx.lineTo(k + .5, yOf(lo[k])); ctx.lineTo(k + .5, yOf(hi[k])); first = false; }
       }
       ctx.stroke();
     }
@@ -756,6 +955,38 @@ function drawScrub() {
 // ------------------------------------------------------------------------------------------------ space-time
 // One row per grain (sorted by x, grouped by track), time left to right, as in the first explorer.
 let _st = null;
+const ST_MAX_FRAMES = 16384, ST_MAX_PIXELS = 64e6;
+// Too many frames or grains for one image: one image pixel per screen pixel (per overview bin, if fewer). Each pixel holds
+// the extreme of its frames and grains furthest from the pixel before it in time, so a short event stays visible.
+function stResampled(d, rows, pw, ph) {
+  const r = dpr(), nt = Math.min(Math.round(pw * r), d.ov ? d.ovB : d.nF), nr = Math.min(Math.round(ph * r), rows.length), c = off(nt, nr), x = c.getContext("2d"), im = x.createImageData(nt, nr);
+  const agree = S.colour === "agree", N = d.ov ? d.ovB : d.nF;
+  for (let py = 0; py < nr; py++) {
+    const r0 = Math.floor(py * rows.length / nr), r1 = Math.max(r0 + 1, Math.floor((py + 1) * rows.length / nr));
+    let prev = null;
+    for (let px = 0; px < nt; px++) {
+      const f0 = Math.floor(px * N / nt), f1 = Math.max(f0 + 1, Math.floor((px + 1) * N / nt));
+      let lo = Infinity, hi = -Infinity, anyWant = !agree;
+      for (let q = r0; q < r1; q++) {
+        const g = rows[q], w = agree ? wantOf(d, g) : 1;
+        if (!w) continue;
+        anyWant = true;
+        for (let f = f0; f < f1; f++) {
+          let a, b;
+          if (d.ov) { const o = (f * d.nG + g) * 4; a = d.ov[o] / 32767; b = d.ov[o + 1] / 32767; } else a = b = gmz(d, f, g);
+          if (w < 0) { const t = a; a = -b; b = -t; }
+          if (a < lo) lo = a; if (b > hi) hi = b;
+        }
+      }
+      const v = !anyWant ? 0 : prev == null ? (lo + hi) / 2 : Math.abs(hi - prev) > Math.abs(lo - prev) ? hi : lo;
+      prev = v;
+      const col = !anyWant ? LUT.mid : rgbOf(agree ? LUT.agree : LUT.m, idxDiv(v)), o = (py * nt + px) * 4;
+      im.data[o] = col[0]; im.data[o + 1] = col[1]; im.data[o + 2] = col[2]; im.data[o + 3] = 255;
+    }
+  }
+  x.putImageData(im, 0, 0);
+  return c;
+}
 function stRows(d) {
   const an = d.an, e = d.e;
   let g = [...Array(d.nG).keys()];
@@ -772,8 +1003,8 @@ function drawSt() {
   const { ctx, w, h } = fit(c, H), pw = w - left - 4;
   const key = `${S.stage}|${S.stAll}|${S.colour}|${rows.length}|${document.documentElement.dataset.theme || ""}`;
   if (!_st || _st.key !== key) {
-    const img = pixImage(d.nF, rows.length, i => { const f = i % d.nF, r = rows.length - 1 - Math.floor(i / d.nF), g = rows[r];
-      if (S.colour === "agree") { const wv = wantOf(d, g); return wv ? rgbOf(LUT.agree, idxDiv(gmz(d, f, g) * wv)) : hex(css("--mid")); }
+    const img = d.ov || d.nF > ST_MAX_FRAMES || d.nF * rows.length > ST_MAX_PIXELS ? stResampled(d, rows, pw, rowH * rows.length) : pixImage(d.nF, rows.length, i => { const f = i % d.nF, r = rows.length - 1 - Math.floor(i / d.nF), g = rows[r];
+      if (S.colour === "agree") { const wv = wantOf(d, g); return wv ? rgbOf(LUT.agree, idxDiv(gmz(d, f, g) * wv)) : LUT.mid; }
       return rgbOf(LUT.m, idxDiv(gmz(d, f, g))); });
     _st = { key, img };
   }
@@ -873,6 +1104,19 @@ function legendHtml() {
   return `<div class="legend-mini"><b>laser isotherms</b>${iso}<span><i class="box"></i>head-field box: red ↑, blue ↓, dashed 0 T</span></div>`;
 }
 
+// values of one grain at frames f0, f0 + step, ... up to f1, one short byte range per frame
+const _samples = new Map();
+function grainSamples(d, g, f0, f1, step) {
+  const key = `${d.st}|${g}|${f0}|${f1}|${step}`;
+  if (_samples.has(key)) return _samples.get(key);
+  if (_samples.size > 64) _samples.delete(_samples.keys().next().value);
+  const G = d.g, sz = G.T.BYTES_PER_ELEMENT, res = { ready: false, mz: new Map(), ml: new Map() }, jobs = [];
+  for (let f = f0; f <= f1; f += step) jobs.push(getRange(G.path, (f * d.nG + g) * 4 * sz, 4 * sz).then(b => {
+    const v = new G.T(b); res.ml.set(f, v[3] / d.gs); res.mz.set(f, v[2] / d.gs * v[3] / d.gs); }));
+  _samples.set(key, res);
+  Promise.all(jobs).then(() => { res.ready = true; redraw(); }).catch(err => { d.err = `grain series: ${err.message}`; _samples.delete(key); redraw(); });
+  return res;
+}
 function drawStory(d, g, a) {
   const svg = $("story"), w = svg.clientWidth || 288, H = 290, NS = "http://www.w3.org/2000/svg";
   svg.setAttribute("viewBox", `0 0 ${w} ${H}`);
@@ -885,10 +1129,14 @@ function drawStory(d, g, a) {
     const half = Math.round(3 * m.p.sigma_x / m.p.v * 1e-9 / (d.time[1] - d.time[0] || 1e-12));
     f0 = Math.max(0, bf - half); f1 = Math.min(d.nF - 1, bf + 2 * half);
   }
+  // long series: only the values of this grain at the plotted frames are read from the file
+  const pst = Math.max(1, Math.floor((f1 - f0) / 300));
+  const sampled = d.ov ? grainSamples(d, g, f0, f1, pst) : null;
+  const vmz = sampled ? f => sampled.mz.get(f) : f => gmz(d, f, g), vml = sampled ? f => sampled.ml.get(f) : f => gml(d, f, g);
   const panels = [];
   if (m) panels.push({ name: "T (K)", lo: m.p.Tmin, hi: m.p.Tmax, v: f => m.T(gx, gy, d.steps[f]), col: css("--ink"), ref: d.e.Tc });
-  panels.push({ name: "|m|", lo: 0, hi: 1, v: f => gml(d, f, g), col: css("--muted") });
-  panels.push({ name: "m<tspan baseline-shift='sub' font-size='9'>z</tspan>", lo: -1, hi: 1, v: f => gmz(d, f, g), col: css("--up"), ref: 0 });
+  panels.push({ name: "|m|", lo: 0, hi: 1, v: vml, col: css("--muted"), series: true });
+  panels.push({ name: "m<tspan baseline-shift='sub' font-size='9'>z</tspan>", lo: -1, hi: 1, v: vmz, col: css("--up"), ref: 0, series: true });
   if (m) panels.push({ name: "B<tspan baseline-shift='sub' font-size='9'>z</tspan> (T)", lo: -m.p.Hpeak, hi: m.p.Hpeak, v: f => { const hd = m.head(d.steps[f]); return m.inBox(gx, gy, hd) ? m.field(d.steps[f]) * m.p.field_uz : 0; }, col: css("--down"), ref: 0 });
   const L = 6, R = 6, top = 4, gap = 8, bot = 16, ph = (H - top - bot - gap * (panels.length - 1)) / panels.length;
   const tx = f => L + (f - f0) / Math.max(1, f1 - f0) * (w - L - R);
@@ -896,8 +1144,8 @@ function drawStory(d, g, a) {
     const y0 = top + i * (ph + gap), yv = v => y0 + ph - (v - P.lo) / (P.hi - P.lo) * ph;
     el("rect", { x: L, y: y0, width: w - L - R, height: ph, fill: "none", stroke: css("--rule") });
     if (P.ref != null) el("line", { x1: L, x2: w - R, y1: yv(P.ref), y2: yv(P.ref), stroke: css("--muted"), "stroke-dasharray": "3 3" });
-    let dd = ""; const st = Math.max(1, Math.floor((f1 - f0) / 300));
-    for (let f = f0; f <= f1; f += st) dd += (f === f0 ? "M" : "L") + tx(f).toFixed(1) + " " + yv(P.v(f)).toFixed(1);
+    let dd = "";
+    if (!(P.series && d.ov && !sampled.ready)) for (let f = f0; f <= f1; f += pst) dd += (f === f0 ? "M" : "L") + tx(f).toFixed(1) + " " + yv(P.v(f)).toFixed(1);
     el("path", { d: dd, fill: "none", stroke: P.col, "stroke-width": 1.5 });
     const t = el("text", { x: L + 5, y: y0 + 12, fill: css("--muted"), "font-size": 11, "font-family": css("--font") }); t.innerHTML = P.name;
   });
@@ -1047,10 +1295,21 @@ function bindControls() {
     else if (ev.key === "Home") { ev.preventDefault(); seek(0); }
     else if (ev.key === "End") { ev.preventDefault(); seek(cur().nF - 1); }
     else if (ev.key === "Escape") { S.sel = -1; redraw(); }
+    else if (ev.key === "+" || ev.key === "=") $("zoom-in").click();
+    else if (ev.key === "-") $("zoom-out").click();
+    else if (ev.key === "0") $("zoom-fit").click();
   });
+  $("zoom-in").onclick = () => { S.follow = false; zoomAt((S.win.x0 + S.win.x1) / 2, 1 / 1.6); };
+  $("zoom-out").onclick = () => { S.follow = false; zoomAt((S.win.x0 + S.win.x1) / 2, 1.6); };
+  $("zoom-fit").onclick = () => { S.follow = false; S.win = { x0: 0, x1: Lx() }; S.y0 = 0; redraw(); };
+  $("follow").onchange = ev => { S.follow = ev.target.checked; redraw(); };
+  const mini = $("minimap");
+  const miniTo = ev => { const r = mini.getBoundingClientRect(), n = span(), x = (ev.clientX - r.left) / r.width * Lx(); S.follow = false; setWindow(x - n / 2, x + n / 2); };
+  mini.addEventListener("pointerdown", ev => { mini.setPointerCapture(ev.pointerId); miniTo(ev); });
+  mini.addEventListener("pointermove", ev => { if (ev.buttons) miniTo(ev); });
   $("save-png").hidden = !!EMB;
   $("save-png").onclick = savePng;
-  window.addEventListener("resize", redraw);
+  window.addEventListener("resize", () => { if (isDefaultWindow()) fitWindow(); redraw(); });
 }
 function themeChanged() { buildLuts(); _st = null; redraw(); drawAnalysis(); }
 let _last = 0;
@@ -1064,6 +1323,7 @@ function tick(ts) {
     _last = ts; const d = cur();
     S.fa += +$("speed").value; const f = Math.min(d.nF - 1, Math.floor(S.fa));
     if (f !== S.f) { S.f = f; prefetch(d); redraw(); }
+    if (d.ov) frameBlock(d, Math.min(d.nF - 1, f + d.g.frames));   // the next block of a long series before playback reaches it
     if (S.f >= d.nF - 1) togglePlay();
   }
   requestAnimationFrame(tick);
@@ -1091,8 +1351,17 @@ function savePng() {
 // ------------------------------------------------------------------------------------------------ stages
 async function setStage(st) {
   S.stage = st; S.sel = -1; S.hov = -1; _st = null;
-  const d = await loadStage(st), e = d.e;
-  if (e.ref) await loadStage(e.ref);                               // intended bits for "vs intended"
+  let d;
+  try {
+    d = await loadStage(st);
+    if (d.e.ref) await loadStage(d.e.ref);                         // intended bits for "vs intended"
+  } catch (err) {
+    console.error(err);
+    $("data-error").hidden = false; $("data-error").textContent = `This run could not be loaded: ${err.message}`;
+    return;
+  }
+  const e = d.e;
+  fitWindow(); S.follow = true;
   S.f = S.fa = e.hamr ? 0 : d.nF - 1;
   const C = cellGeom(d);
   S.ysec = C ? C.p.TW * .5 + C.p.pad : e.size_nm[1] / 2;

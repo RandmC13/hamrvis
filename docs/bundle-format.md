@@ -9,6 +9,7 @@ manifest.json
 <run>/output.f64              float64 [rows, cols]          the run's 'output' file; column names in the manifest
 <run>/grains.i16            int16   [frames, grains, 4]   grain.txt per-grain block: mx, my, mz (direction), |m|; value x 32767
 <run>/grain_lead.f64        float64 [frames, n_lead]      grain.txt leading columns (time in s, temperature in K)
+<run>/grains_overview.i16   int16   [bins, grains, 4]     series over 512 MB only: per time bin lowest and highest m_z (mz x |m|), lowest and highest |m|, x 32767
 <run>/top/NNNNNNNN.i8.gz    int8    [3, ny, nx]           snapshot NNNNNNNN: mean spin of the magnetic atoms in each column, x 127
 <run>/vol/NNNNNNNN.i8.gz    int8    [3, nz, vy, vx]       snapshot NNNNNNNN: mean spin per layer on 2x2-site pixels, x 127
 <run>/top_count.u8          uint8   [ny, nx]              magnetic atoms per column (capped at 255)
@@ -27,6 +28,10 @@ With `--precision 16` the snapshot files are `NNNNNNNN.i16.gz` (int16, x 32767, 
 empty grain list and no grain files; the viewer then steps through its snapshots. Pixels with no magnetic atom (grain boundaries) hold -128 in the int8
 arrays. The first array index of `[3, ...]` arrays is the x, y, z component. Row `iy` of a map is y = (iy + 0.5) x
 pitch from the bottom of the film; the viewer flips it for display.
+
+A series with an overview is read in blocks by HTTP byte ranges (`hamrvis view` answers them); no other part of the
+format depends on its size. While `reduce` runs, a folder `.reduce-work` holds its per-atom indices and progress; a bundle
+that still has it is unfinished.
 
 ## manifest.json
 
@@ -47,7 +52,8 @@ runs: [ {                 in run order (the order the runs started), one per tab
    checks               {column_rounding_max, grain_txt_same_step {n, max_diff},
                          grain_txt_one_step_earlier {n, max_diff, median_diff}}
    source_files         {name: [bytes, mtime]} of input, output, grain.txt, dipole-field.txt
-   grain_series         {frames, lead: ["time", "temperature"], dtype: "f32" (if not int16), every: N (if thinned)}
+   grain_series         {frames, lead: ["time", "temperature"], dtype: "f32" (if not int16), every: N (if thinned),
+                         overview: {bins} (if grains_overview.i16 exists; frames f of bin b: b*frames//bins <= f < (b+1)*frames//bins)}
    snapshots            {grid: {pitch_nm, pitch_z_nm, z0_nm, nx, ny, nz, vx, vy}, volume, frames: [{index, time}],
                          skipped: [indices], dtype: "i16" | "f32" (if not int8)}
    notes                [text] what was left out and why (no grain-coordinates.txt, unreadable grain.txt)

@@ -27,7 +27,9 @@ def _run_args(p):
                                                                       "column map is coarsened (default %(default).0f)")
     p.add_argument("--layer-max", type=float, default=red.LAYER_MAX, help="per-layer cells per snapshot before the "
                                                                           "layer grid is coarsened (default %(default).0f)")
-    p.add_argument("-j", "--workers", type=int, help="parallel snapshot workers (default: CPUs - 1)")
+    p.add_argument("-j", "--workers", type=int, help="parallel snapshot workers (default: CPUs - 1, as far as --mem allows)")
+    p.add_argument("--mem", type=float, metavar="GB", help="memory budget for the snapshot workers (default: what is free, "
+                                                           "or left of the job's limit)")
 
 
 def _opts(a):
@@ -37,7 +39,8 @@ def _opts(a):
     th = {k: getattr(a, k) for k in red.THRESHOLDS if getattr(a, k, None) is not None}
     return dict(precision=a.precision, grain_precision=a.grain_precision, grain_every=a.grain_every,
                 snapshots=not a.no_snapshots, top_max=a.top_max, layer_max=a.layer_max, thresholds=th,
-                every=a.every, volume=not a.no_volume, workers=a.workers)
+                every=a.every, volume=not a.no_volume, workers=a.workers,
+                mem=a.mem * 1e9 if a.mem else None)
 
 
 def main():

@@ -9,19 +9,27 @@ tests/make_scenarios.py; the tests reduce each folder as a whole. They also cove
 a continuous (grain-less) film, text snapshots, one data file per MPI process, and custom file names with other
 units. tests/fidelity/ checks bundles against an independent reader of the raw files.
 """
+import contextlib
+import functools
 import gzip
+import http.server
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
 
-from hamrvis import export, reduce, runs, vampire as vp
+from hamrvis import export, reduce, runs, serve, vampire as vp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = os.path.join(HERE, "fixture-run")
@@ -30,6 +38,19 @@ LEADIN_FIXED = os.path.join(HERE, "fixture-leadin-fixed")
 RUN_T0 = os.path.join(HERE, "fixture-t0")    # 0 K time series: snapshot and grain.txt share step 0
 APP = os.path.join(HERE, "..", "viewer", "app.js")
 SCEN = os.path.join(HERE, "scenarios")
+
+
+def read_coords(path):
+    """(type, xyz, grain) of a whole coordinate file."""
+    parts = list(vp.coord_chunks(path))
+    return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
+
+
+def read_grain_file(run_dir, n_grains):
+    """({name: column}, float64 [frames, grains, 4]) of a whole grain.txt."""
+    names, rows = vp.grain_rows(run_dir, n_grains)
+    d = np.array(list(rows))
+    return {n: d[:, i] for i, n in enumerate(names)}, d[:, len(names):].reshape(len(d), n_grains, 4)
 
 
 class FieldModel(unittest.TestCase):
@@ -96,7 +117,7 @@ class TrackRules(unittest.TestCase):
                 shutil.copy(os.path.join(RUN, f), d)
             text = open(os.path.join(RUN, "input")).read().replace("grain:real-time", "grain:time-steps")
             open(os.path.join(d, "input"), "w").write(text)
-            cols, m = vp.read_grain_file(d, 9)
+            cols, m = read_grain_file(d, 9)
             self.assertEqual(list(cols), ["step"])
             self.assertEqual(m.shape[1:], (9, 4))
 
@@ -187,7 +208,7 @@ class Reduce(unittest.TestCase):
         e = self.man["runs"][0]
         M = e["grain_map"]
         gm = np.fromfile(os.path.join(self.bundle, "fixture-run", "grain_map.i16"), np.int16).reshape(M["ny"], M["nx"])
-        typ, xyz, g = vp.read_coords(vp.coord_files(RUN)[0])
+        typ, xyz, g = read_coords(vp.coord_files(RUN)[0])
         mag = np.isin(typ, e["magnetic_types"])
         ix = np.rint(xyz[mag, 0] / (M["pitch_nm"] * 10)).astype(int) % M["nx"]
         iy = np.rint(xyz[mag, 1] / (M["pitch_nm"] * 10)).astype(int) % M["ny"]
@@ -215,7 +236,7 @@ class Reduce(unittest.TestCase):
         idx, _, files, _ = vp.snapshots(RUN)[-1]
         q = np.frombuffer(gzip.open(os.path.join(self.bundle, "fixture-run", "top", f"{idx:08d}.i8.gz")).read(), np.int8)
         q = q.reshape(3, G["ny"], G["nx"])
-        typ, xyz, _ = vp.read_coords(vp.coord_files(RUN)[0])
+        typ, xyz, _ = read_coords(vp.coord_files(RUN)[0])
         s = vp.read_spins(files[0])
         mag = np.isin(typ, e["magnetic_types"])
         ix = np.rint(xyz[mag, 0] / (G["pitch_nm"] * 10)).astype(int) % G["nx"]
@@ -515,8 +536,8 @@ class Parsing(unittest.TestCase):
         cols, out = vp.read_output(d)
         full = vp.read_output(os.path.join(SCEN, "write-only", "write"))[1]
         np.testing.assert_array_equal(out, full[:-1])
-        lead, m = vp.read_grain_file(d, 9)
-        self.assertEqual(len(m), len(vp.read_grain_file(os.path.join(SCEN, "write-only", "write"), 9)[1]) - 1)
+        lead, m = read_grain_file(d, 9)
+        self.assertEqual(len(m), len(read_grain_file(os.path.join(SCEN, "write-only", "write"), 9)[1]) - 1)
 
     def test_dipole_cells_default_to_vampire_size(self):
         # cells:macro-cell-size defaults to 10 A in VAMPIRE; the read was run with 1 nm cells written out
@@ -631,6 +652,224 @@ class NewScenarios(unittest.TestCase):
         d = os.path.join(SCEN, "file-per-process", "write")
         self.assertEqual(len(vp.coord_files(d)), 2)
         self.assertEqual(len(vp.snapshots(d)[0][2]), 2)
+
+
+class Scale(unittest.TestCase):
+    """Generated run of known content (tests/make_large.py) and what makes the reducer work at any size."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, HERE)
+        import make_large
+        cls.ml = make_large
+        cls.tmp = tempfile.mkdtemp()
+        cls.rundir = os.path.join(cls.tmp, "run")
+        with contextlib.redirect_stdout(io.StringIO()):
+            make_large.make(cls.rundir, 100, 30, 2e5, 60, 400, 3)
+        cls.h = vp.Hamr(cls.rundir)
+        cls.nF, cls.film = 0, make_large.Film(100, 30, 2e5, 60)
+        cls.x, cls.y, cls.mags = cls.film.centres()
+        cls.state = make_large.State(cls.h, cls.x, cls.y)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def bundle(self, name, **kw):
+        out = os.path.join(self.tmp, name)
+        reduce.reduce([self.rundir], out, workers=1, **kw)
+        return out, json.load(open(os.path.join(out, "manifest.json")))["runs"][0]
+
+    def test_grain_series_and_overview_hold_the_known_answer(self):
+        old = reduce.GRAIN_WHOLE_MAX
+        reduce.GRAIN_WHOLE_MAX = 0                        # as a long series
+        try:
+            out, e = self.bundle("long")
+        finally:
+            reduce.GRAIN_WHOLE_MAX = old
+        gs = e["grain_series"]
+        nG, nF, bins = len(e["grains"]["id"]), gs["frames"], gs["overview"]["bins"]
+        steps = np.rint(np.fromfile(os.path.join(out, "run", "grain_lead.f64")).reshape(nF, 2)[:, 0] / self.h.dt).astype(int)
+        g = np.fromfile(os.path.join(out, "run", "grains.i16"), np.int16).reshape(nF, nG, 4) / 32767
+        for f in range(0, nF, 37):
+            d, m = self.state.at(steps[f])
+            np.testing.assert_allclose(g[f, :, 2], d, atol=1e-4)
+            np.testing.assert_allclose(g[f, :, 3], m, atol=1e-4)
+        ov = np.fromfile(os.path.join(out, "run", "grains_overview.i16"), np.int16).reshape(bins, nG, 4) / 32767
+        mz = g[:, :, 2] * g[:, :, 3]
+        for b in range(bins):
+            part, ml = mz[b * nF // bins:(b + 1) * nF // bins], g[b * nF // bins:(b + 1) * nF // bins, :, 3]
+            np.testing.assert_allclose(ov[b, :, 0], part.min(0), atol=1 / 32767)
+            np.testing.assert_allclose(ov[b, :, 1], part.max(0), atol=1 / 32767)
+            np.testing.assert_allclose(ov[b, :, 2], ml.min(0), atol=1 / 32767)
+            np.testing.assert_allclose(ov[b, :, 3], ml.max(0), atol=1 / 32767)
+        # export holds the thinned series whole, so without the overview
+        html = os.path.join(self.tmp, "long.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            export.export(out, html, grain_step=20, volume=False, limit_mb=1000)
+        self.assertNotIn('"overview"', re.search(r'manifest.json":"([^"]*)"', open(html).read()).group(0))
+
+    def test_snapshots_hold_the_known_answer(self):
+        out, e = self.bundle("snaps")
+        G = e["snapshots"]["grid"]
+        self.assertEqual((G["nx"], G["ny"]), (self.film.nx, self.film.ny))
+        fr = e["snapshots"]["frames"][-1]
+        d, m = self.state.at(round(fr["time"] / self.h.dt))
+        q = np.frombuffer(gzip.open(os.path.join(out, "run", "top", f"{fr['index']:08d}.i8.gz")).read(), np.int8).reshape(3, G["ny"], G["nx"])
+        gm = np.fromfile(os.path.join(out, "run", "grain_map.i16"), np.int16).reshape(G["ny"], G["nx"])
+        ok = gm >= 0
+        self.assertEqual(int(ok.sum()), int((self.mags / self.film.nz).sum()))
+        np.testing.assert_allclose(q[2][ok] / 127, (d * m)[gm[ok]], atol=0.5 / 127 + 1e-9)
+        self.assertTrue((q[2][~ok] == -128).all())
+        self.assertLess(e["checks"]["grain_txt_one_step_earlier"]["max_diff"], 2e-3)   # spins against grain.txt
+        self.assertGreaterEqual(e["checks"]["grain_txt_one_step_earlier"]["n"], 2)
+
+    def test_pieces_change_nothing(self):
+        out_a, a = self.bundle("whole")
+        old = vp.coord_chunks.__defaults__
+        vp.coord_chunks.__defaults__ = (777,)
+        try:
+            out_b, b = self.bundle("pieces")
+        finally:
+            vp.coord_chunks.__defaults__ = old
+        self.assertEqual(open(os.path.join(out_a, "run", "grain_map.i16"), "rb").read(), open(os.path.join(out_b, "run", "grain_map.i16"), "rb").read())
+        self.assertEqual(open(os.path.join(out_a, "run", "top_count.u8"), "rb").read(), open(os.path.join(out_b, "run", "top_count.u8"), "rb").read())
+        for k in ("x", "y", "magnetic_atoms"):
+            self.assertEqual(a["grains"][k], b["grains"][k])
+        f = vp.snapshots(self.rundir)[1][2][0]
+        np.testing.assert_array_equal(np.concatenate(list(vp.spin_chunks(f, 777))), vp.read_spins(f))
+
+    def test_interrupted_reduce_carries_on(self):
+        def tree(out):
+            return {os.path.relpath(os.path.join(d, f), out): gzip.decompress(open(os.path.join(d, f), "rb").read()) if f.endswith(".gz") else open(os.path.join(d, f), "rb").read()
+                    for d, _, fs in os.walk(out) for f in fs if f != "manifest.json"}
+        whole, _ = self.bundle("uninterrupted")
+        # during the snapshots: the first save of progress is the last thing the job does
+        saver, every = reduce._save_progress, reduce.SAVE_EVERY
+
+        def killed(*a):
+            saver(*a)
+            raise KeyboardInterrupt
+        reduce._save_progress, reduce.SAVE_EVERY = killed, -1
+        out = os.path.join(self.tmp, "killed")
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                reduce.reduce([self.rundir], out, workers=1)
+        finally:
+            reduce._save_progress, reduce.SAVE_EVERY = saver, every
+        self.assertTrue(os.path.exists(os.path.join(out, reduce.WORK, "run", "progress.npz")))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reduce.reduce([self.rundir], out, workers=1)
+        self.assertIn("carrying on", buf.getvalue())
+        self.assertIn("already parsed", buf.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(out, reduce.WORK)))
+        self.assertEqual(tree(whole), tree(out))
+        ma, mb = (json.load(open(os.path.join(p, "manifest.json")))["runs"] for p in (whole, out))
+        self.assertEqual(ma, mb)
+
+    def test_interrupted_between_runs_and_other_options_start_again(self):
+        out = os.path.join(self.tmp, "between")
+        scen = os.path.join(SCEN, "chain")
+        atoms = reduce.reduce_atoms
+
+        def stop_at_write(dirs, *a, **k):
+            if dirs[0].endswith("write"):
+                raise KeyboardInterrupt
+            return atoms(dirs, *a, **k)
+        reduce.reduce_atoms = stop_at_write
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                reduce.reduce([scen], out, workers=1)
+        finally:
+            reduce.reduce_atoms = atoms
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reduce.reduce([scen], out, workers=1)
+        self.assertIn("1 of 3 runs were complete", buf.getvalue())
+        self.assertEqual([e["id"] for e in json.load(open(os.path.join(out, "manifest.json")))["runs"]], ["relax", "write", "read"])
+        self.assertEqual(json.load(open(os.path.join(out, "manifest.json")))["runs"][2]["ref"], "write")
+        # nothing to carry on after a complete reduce, and a different request starts again
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reduce.reduce([scen], out, every=2, workers=1)
+        self.assertNotIn("carrying on", buf.getvalue())
+
+    def test_changed_options_leave_nothing_of_the_unfinished_reduce(self):
+        out = os.path.join(self.tmp, "changed")
+        atoms = reduce.reduce_atoms
+
+        def stop(*a, **k):
+            raise KeyboardInterrupt
+        reduce.reduce_atoms = stop
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                reduce.reduce([self.rundir], out, workers=1, opts=dict(grain_precision=32))
+        finally:
+            reduce.reduce_atoms = atoms
+        self.assertTrue(os.path.exists(os.path.join(out, "run", "grains.f32")))
+        reduce.reduce([self.rundir], out, workers=1)      # different options: starts again
+        self.assertFalse(os.path.exists(os.path.join(out, "run", "grains.f32")))
+        self.assertFalse(os.path.exists(os.path.join(out, reduce.WORK)))
+
+    def test_accumulator_matches_the_whole_series(self):
+        rng = np.random.default_rng(7)
+        m = rng.uniform(-1, 1, (200, 40, 4)).astype(np.float32)
+        m[:, :, 3] = np.abs(m[:, :, 3])
+        m[-1, 3, 2] = 0                                   # final m_z exactly 0
+        m[150:, 5, 2] = np.sign(m[150, 5, 2]) or 1        # settled long before the end
+        m[:, 6, 2], m[:, 6, 3] = 1, .9                    # never below the threshold
+        acc = reduce.GrainAccumulator(40, reduce.DECISION)
+        for f in m:
+            acc.add(f)
+        final, minM, anyb, dec, m_dec = acc.outcome()
+        # the formulas on the whole array
+        mz = m[:, :, 2] * m[:, :, 3]
+        want_final = mz[-1]
+        below = mz * np.sign(want_final) < reduce.DECISION
+        want_dec = np.minimum(np.where(below.any(0), len(m) - np.argmax(below[::-1], axis=0), 0), len(m) - 1)
+        np.testing.assert_array_equal(final, want_final)
+        np.testing.assert_array_equal(minM, m[:, :, 3].min(0))
+        np.testing.assert_array_equal(anyb, below.any(0))
+        np.testing.assert_array_equal(dec, want_dec)
+        got = below.any(0)
+        np.testing.assert_array_equal(m_dec[got], m[want_dec, np.arange(40), 3][got])
+
+    def test_outlines_match_the_plain_search(self):
+        coords = np.array(vp.read_grain_coordinates(RUN))
+        shapes = vp.read_grain_shapes(RUN)
+        res = vp.grain_outlines(coords, shapes)
+        cen = np.array([s.mean(axis=0) for s in shapes])
+        for (x, y), o in zip(coords[:, 1:3], res):
+            inside = [s for s in shapes if vp._contains(s, x, y)]
+            want = inside[0] if len(inside) == 1 else shapes[int(np.argmin(np.hypot(*(cen - (x, y)).T)))]
+            np.testing.assert_array_equal(o, want)
+
+    def test_worker_count_follows_the_memory_budget(self):
+        self.assertEqual(reduce.worker_count(100, 1e9, 3, 1e9)[0], 3)              # -j wins
+        self.assertEqual(reduce.worker_count(100, 1e9, None, 2.5e9)[0], min(2, reduce._cpus() - 1 or 1))
+        self.assertEqual(reduce.worker_count(100, 1e12, None, 1e9)[0], 1)
+        self.assertEqual(reduce.worker_count(1, 1e6, None, 1e12)[0], 1)            # never more than jobs
+
+    def test_server_answers_byte_ranges(self):
+        out, _ = self.bundle("ranges")
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(serve.Handler, bundle=out))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_address[1]}/bundle/run/grains.i16"
+            raw = open(os.path.join(out, "run", "grains.i16"), "rb").read()
+            r = urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=800-815"}))
+            self.assertEqual((r.status, r.read(), r.headers["Content-Range"]), (206, raw[800:816], f"bytes 800-815/{len(raw)}"))
+            self.assertEqual(urllib.request.urlopen(url).read(), raw)                 # no Range: whole file
+            r = urllib.request.urlopen(urllib.request.Request(url, headers={"Range": f"bytes={len(raw) - 2}-{len(raw) + 9}"}))
+            self.assertEqual(r.read(), raw[-2:])                                     # past the end: what is there
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(urllib.request.Request(url, headers={"Range": f"bytes={len(raw) + 5}-{len(raw) + 9}"}))
+            self.assertEqual(ctx.exception.code, 416)
+            with self.assertRaises(urllib.error.HTTPError):                          # never outside the bundle
+                urllib.request.urlopen(urllib.request.Request(url.replace("run/grains.i16", "../../input"), headers={"Range": "bytes=0-5"}))
+        finally:
+            srv.shutdown()
 
 
 if __name__ == "__main__":

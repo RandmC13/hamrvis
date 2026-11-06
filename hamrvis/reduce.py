@@ -5,6 +5,7 @@ Bundle layout (see docs/bundle-format.md):
     <run>/output.f64                  'output' file, [rows, cols]
     <run>/grains.i16                grain.txt per-grain block, [frames, grains, 4] x 1/32767
     <run>/grain_lead.f64            grain.txt leading columns (time, temperature), [frames, n_lead]
+    <run>/grains_overview.i16       long series only: per time bin mz min, mz max, |m| min, |m| max, [bins, grains, 4] x 1/32767
     <run>/top/NNNNNNNN.i8.gz        snapshot NNNNNNNN: column-averaged magnetisation, [3, ny, nx] x 1/127
     <run>/vol/NNNNNNNN.i8.gz        snapshot NNNNNNNN: per-layer magnetisation, [3, nz, ny/2, nx/2] x 1/127
                                       (.i16.gz x 1/32767 or .f32.gz with --precision 16 / 32)
@@ -25,6 +26,8 @@ import os
 import re
 import shutil
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 
@@ -32,6 +35,7 @@ from . import runs as rn
 from . import vampire as vp
 
 FORMAT_VERSION = 2
+WORK = ".reduce-work"   # inside the bundle while reducing: per-atom indices and progress; removed at the end
 
 # write analysis thresholds (see docs/analysis.md)
 DECISION = 0.05     # m_z|m| below this in the final direction = not yet decided
@@ -66,11 +70,22 @@ def magnetic_types(run_dir):
     return [i - 1 for i in range(1, max(idx) + 1) if i not in nonmag]
 
 
-def _pitch(values, tol=1e-3):
-    """Smallest spacing between distinct coordinate values (A); values closer than 2 tol count as equal."""
-    u = np.unique(np.round(np.asarray(values) / tol) * tol)
+TOL = 1e-3         # coordinates closer than 2 TOL (A) count as equal
+
+
+def axis_stats(xyz, stats=None):
+    """Add atoms to the extent of a run's lattice, which Grid needs: distinct x and z values and the z range."""
+    ux, uz = np.unique(np.round(xyz[:, 0] / TOL) * TOL), np.unique(np.round(xyz[:, 2] / TOL) * TOL)
+    if stats is None:
+        return dict(ux=ux, uz=uz, z0=float(xyz[:, 2].min()), z1=float(xyz[:, 2].max()))
+    return dict(ux=np.union1d(stats["ux"], ux), uz=np.union1d(stats["uz"], uz),
+                z0=min(stats["z0"], float(xyz[:, 2].min())), z1=max(stats["z1"], float(xyz[:, 2].max())))
+
+
+def _pitch(u):
+    """Smallest spacing between distinct coordinate values (A)."""
     d = np.diff(u)
-    d = d[d > 2 * tol]
+    d = d[d > 2 * TOL]
     return float(d.min()) if len(d) else 1.0
 
 
@@ -84,13 +99,13 @@ class Grid:
     per-layer grid of lf x lf sites per atomic layer (lf = 2 by default: one site per layer can be empty in
     non-cubic lattices, 2 x 2 sites never are inside a grain; larger when LAYER_MAX would be exceeded)."""
 
-    def __init__(self, Lx_nm, Ly_nm, xyz, layer_factor=None, top_max=TOP_MAX, layer_max=LAYER_MAX):
-        self.p = _pitch(xyz[:, 0])                                # A
-        self.pz = _pitch(xyz[:, 2])
-        self.z0 = float(xyz[:, 2].min())
+    def __init__(self, Lx_nm, Ly_nm, stats, layer_factor=None, top_max=TOP_MAX, layer_max=LAYER_MAX):
+        self.p = _pitch(stats["ux"])                              # A
+        self.pz = _pitch(stats["uz"])
+        self.z0 = stats["z0"]
         self.nx0 = int(round(Lx_nm * 10 / self.p))
         self.ny0 = int(round(Ly_nm * 10 / self.p))
-        self.nz = int(round((xyz[:, 2].max() - self.z0) / self.pz)) + 1
+        self.nz = int(round((stats["z1"] - self.z0) / self.pz)) + 1
         self.tf = max(1, math.ceil(math.sqrt(self.nx0 * self.ny0 / top_max)))
         self.lf = layer_factor or max(2, math.ceil(math.sqrt(self.nx0 * self.ny0 * self.nz / layer_max)))
         self.nx, self.ny = -(-self.nx0 // self.tf), -(-self.ny0 // self.tf)
@@ -134,7 +149,19 @@ def _write_gz(path, arr):
 
 
 # ------------------------------------------------------------------------------------------------ snapshots
-_W = {}   # per-worker state, inherited through fork
+_W = {}   # per-worker state, set by _init_worker
+
+
+def _init_worker(state):
+    """Worker set-up (works with spawn, so on every platform): the per-atom bin indices stay in files mapped read-only,
+    so all workers share one copy in the page cache instead of each holding its own."""
+    _W.update(state)
+    _W["bins"] = [tuple(np.load(os.path.join(state["work"], f"bin{k}.{n}.npy"), mmap_mode="r") for n in BIN_ARRAYS)
+                  for k in range(state["n_files"])]
+    _W["ct"], _W["cv"] = (np.load(os.path.join(state["work"], f"{n}.npy")) for n in ("ct", "cv"))
+
+
+BIN_ARRAYS = ("mask", "kt", "kv", "gi")
 
 
 def _bin_snapshot(job):
@@ -144,31 +171,37 @@ def _bin_snapshot(job):
         return job[0], None, None, str(err)
 
 
-def _bin_spins(spins):
-    """Column, volume and grain sums (top, vol, gs) of the spins of every data file of a snapshot."""
+def _new_sums():
     g, nG = _W["grid"], _W["n_grains"]
-    top = np.zeros((3, g.ny * g.nx))
-    vol = np.zeros((3, g.nz * g.vy * g.vx)) if _W["volume"] else None
-    gs = np.zeros((3, nG + 1))                     # last bin: atoms of no listed grain
-    for s, (mask, kt, kv, gi) in zip(spins, _W["bins"]):
-        s = s[mask]
-        for c in range(3):
-            top[c] += np.bincount(kt, s[:, c], minlength=top.shape[1])
-            gs[c] += np.bincount(gi, s[:, c], minlength=nG + 1)
-            if vol is not None:
-                vol[c] += np.bincount(kv, s[:, c], minlength=vol.shape[1])
-    return top, vol, gs
+    return (np.zeros((3, g.ny * g.nx)), np.zeros((3, g.nz * g.vy * g.vx)) if _W["volume"] else None,
+            np.zeros((3, nG + 1)))                 # last grain bin: atoms of no listed grain
+
+
+def _add_spins(sums, s, kt, kv, gi):
+    """Add spins of magnetic atoms to the column, volume and grain sums."""
+    top, vol, gs = sums
+    for c in range(3):
+        top[c] += np.bincount(kt, s[:, c], minlength=top.shape[1])
+        gs[c] += np.bincount(gi, s[:, c], minlength=gs.shape[1])
+        if vol is not None:
+            vol[c] += np.bincount(kv, s[:, c], minlength=vol.shape[1])
 
 
 def _bin_snapshot_checked(job):
     idx, files, out_dir = job
-    spins = []
-    for f, (mask, *_) in zip(files, _W["bins"]):
-        s = vp.read_spins(f)
-        if len(s) != len(mask):
-            raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
-        spins.append(s)
-    return _write_snapshot(idx, out_dir, *_bin_spins(spins))
+    sums = _new_sums()
+    for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
+        a, m = 0, 0                                # atoms and magnetic atoms done in this file
+        for s in vp.spin_chunks(f):
+            sel = np.asarray(mask[a:a + len(s)])
+            if len(sel) != len(s):
+                raise IOError(f"{f}: more spins than the {len(mask)} atoms of its coordinate file")
+            s, c = s[sel], int(sel.sum())
+            _add_spins(sums, s, kt[m:m + c], kv[m:m + c], gi[m:m + c])
+            a, m = a + len(sel), m + c
+        if a != len(mask):
+            raise IOError(f"{f}: {a} spins, but its coordinate file has {len(mask)} atoms")
+    return _write_snapshot(idx, out_dir, *sums)
 
 
 def _window_series(snaps, out_dir, keep):
@@ -176,25 +209,27 @@ def _window_series(snaps, out_dir, keep):
     sums of a complete snapshot are binned in full, and a window snapshot changes them by the binned
     difference of the spins it holds (new minus old), so only the atoms near the head are touched."""
     state, sums = None, None
+    mask_index = [np.cumsum(np.asarray(mask)).astype(np.int64) - 1 for mask, *_ in _W["bins"]]
     for idx, t, files, window in snaps:
         if not window:
             state = []
-            for f, (mask, *_) in zip(files, _W["bins"]):
+            sums = _new_sums()
+            for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
                 s = vp.read_spins(f)
                 if len(s) != len(mask):
                     raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
                 state.append(s)
-            sums = _bin_spins(state)
+                _add_spins(sums, s[np.asarray(mask)], kt, kv, gi)
         elif state is None:
             raise IOError(f"snapshot {idx} is a window snapshot with no complete snapshot before it")
         else:
             top, vol, gs = sums
             nG = _W["n_grains"]
-            for s, f, (mask, kt, kv, gi), midx in zip(state, files, _W["bins"], _W["mask_index"]):
+            for s, f, (mask, kt, kv, gi), midx in zip(state, files, _W["bins"], mask_index):
                 n, pos, new = vp.read_window_spins(f)
                 if n != len(mask):
                     raise IOError(f"{f}: {n} atoms, but its coordinate file has {len(mask)}")
-                d, sel = new - s[pos], mask[pos]
+                d, sel = new - s[pos], np.asarray(mask[pos])
                 k = midx[pos[sel]]
                 for c in range(3):
                     top[c] += np.bincount(kt[k], d[sel, c], minlength=top.shape[1])
@@ -222,6 +257,58 @@ def _write_snapshot(idx, out_dir, top, vol, gs):
     return idx, m.astype(np.float32), gs, float(q_err)
 
 
+def available_memory():
+    """Bytes this job may still use: free memory, or what is left of its cgroup (Slurm) limit if that is lower."""
+    best = None
+    try:
+        with open("/proc/meminfo") as f:
+            best = int(re.search(r"MemAvailable:\s*(\d+)", f.read()).group(1)) * 1024
+    except (OSError, AttributeError):
+        try:
+            best = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError, AttributeError):
+            pass
+    slurm = os.environ.get("SLURM_MEM_PER_NODE") or (os.environ.get("SLURM_MEM_PER_CPU") and
+                                                     int(os.environ["SLURM_MEM_PER_CPU"]) * _cpus())
+    if slurm:                                      # MB; a tenth is left for the main process
+        best = 0.9 * int(slurm) * 1e6 if best is None else min(best, 0.9 * int(slurm) * 1e6)
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f, open("/sys/fs/cgroup/memory.current") as g:
+            limit = f.read().strip()
+            if limit != "max":
+                left = int(limit) - int(g.read())
+                best = left if best is None else min(best, left)
+    except (OSError, ValueError):
+        pass
+    return best
+
+
+def _cpus():
+    try:
+        return len(os.sched_getaffinity(0))        # the CPUs of this job, not of the node (Linux only)
+    except AttributeError:
+        return os.cpu_count() or 2
+
+
+def worker_memory(grid, max_atoms_per_file, volume, bits=8):
+    """Peak bytes of one snapshot worker: a piece of a spin file (twice during the mask copy), the sums and quantised grids."""
+    atoms = min(max_atoms_per_file, vp.CHUNK_ATOMS)
+    cells = grid.nx * grid.ny + (grid.nz * grid.vy * grid.vx if volume else 0)
+    return 2 * 24 * atoms + cells * (24 + 3 * bits // 8) + 100e6
+
+
+def worker_count(jobs, each, requested=None, mem=None):
+    """(workers, why): the -j value, else one per CPU (one left free) as far as the memory budget allows."""
+    if requested:
+        return requested, "as requested"
+    n = min(jobs, max(1, _cpus() - 1))
+    budget = mem if mem else available_memory()
+    if budget and n * each > budget:
+        n = max(1, int(budget // each))
+        return n, f"limited by memory: {each / 1e9:.1f} GB each, budget {budget / 1e9:.1f} GB"
+    return n, "one per CPU"
+
+
 def _resume_steps(dirs):
     """Step at which each segment after the first took over (None for the first)."""
     return [None] + [vp.checkpoint_resume_step(d) for d in dirs[1:]]
@@ -246,54 +333,80 @@ def _join_rows(parts, times, dirs, dt):
     return np.concatenate(keep) if len(keep) > 1 else keep[0]
 
 
-def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=True, every=1, workers=None,
-                 layer_factor=None, opts=None):
-    """From the atom coordinates: exact top-down grain map, grain centres; then bin every spin snapshot onto the
-    grids and check each snapshot's per-grain mean spin against grain.txt at the same time step."""
-    run_dir = dirs[0]                                     # the jobs of a run share its atoms
-    cfiles = vp.coord_files(run_dir)
-    if not cfiles:
-        return
+def _index_type(n):
+    return np.int32 if n < 2 ** 31 else np.int64
+
+
+def _merge_counts(keys, counts, new):
+    """Add the keys in new to sorted unique keys with counts."""
+    k, c = np.unique(new, return_counts=True)
+    if keys is None:
+        return k, c
+    merged, inv = np.unique(np.concatenate([keys, k]), return_inverse=True)
+    return merged, np.bincount(inv, np.concatenate([counts, c]), minlength=len(merged)).astype(np.int64)
+
+
+def _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor):
+    """Read the coordinate files a piece at a time: lattice extent, then per-atom bin indices (written to work/, one
+    set per data file), atom counts per pixel, grain map, grain centres. Returns what the snapshot pass needs."""
     Lx, Ly = entry["size_nm"][:2]
     mtypes, ids = entry["magnetic_types"], entry["grains"]["id"]
     nG = len(ids)
     gindex = np.full(max(ids, default=-1) + 2, nG, np.int64)          # grain ID -> grain index; nG collects other IDs
     gindex[ids] = np.arange(nG)
-    log(f"  reading {len(cfiles)} coordinate files")
-    coords = [vp.read_coords(f) for f in cfiles]
     magnetic = (lambda t: np.ones(len(t), bool)) if mtypes is None else (lambda t: np.isin(t, mtypes))
-    allmag = np.concatenate([xyz[magnetic(t)] for t, xyz, _ in coords])
-    opts = opts or {}
-    grid = Grid(Lx, Ly, allmag, layer_factor, opts.get("top_max", TOP_MAX), opts.get("layer_max", LAYER_MAX))
-    del allmag
-    have_ids = all(g is not None for _, _, g in coords)
+    log(f"  reading {len(cfiles)} coordinate files")
+    stats, have_ids, atoms_per_file, magnetic_per_file = None, True, [], []
+    for f in cfiles:
+        n, nm = 0, 0
+        for t, xyz, g in vp.coord_chunks(f):
+            n += len(t)
+            have_ids = have_ids and g is not None
+            m = xyz[magnetic(t)]
+            nm += len(m)
+            if len(m):
+                stats = axis_stats(m, stats)
+        atoms_per_file.append(n)
+        magnetic_per_file.append(nm)
+    if stats is None:
+        raise SystemExit(f"{cfiles[0]}: no magnetic atoms in the coordinate files")
+    grid = Grid(Lx, Ly, stats, layer_factor, opts.get("top_max", TOP_MAX), opts.get("layer_max", LAYER_MAX))
     if not have_ids:
         log("  WARNING: the coordinate files hold no grain IDs (older text format): grain shapes stay VAMPIRE's "
             "approximate Voronoi outlines and snapshots are not checked against grain.txt")
-    bins, ct, cv = [], np.zeros(grid.ny * grid.nx), np.zeros(grid.nz * grid.vy * grid.vx)
-    pairs = []
+    ct, cv = np.zeros(grid.ny * grid.nx), np.zeros(grid.nz * grid.vy * grid.vx)
     cx, sx, cy, sy, na = (np.zeros(nG + 1) for _ in range(5))
-    for t, xyz, g in coords:
-        mask = magnetic(t)
-        kt, kv = grid.indices(xyz[mask])
-        gi = gindex[np.clip(g[mask], 0, len(gindex) - 1)] if g is not None else np.full(mask.sum(), nG)
-        ct += np.bincount(kt, minlength=ct.size)
-        cv += np.bincount(kv, minlength=cv.size)
-        ax, ay = 2 * np.pi * xyz[mask, 0] / (Lx * 10), 2 * np.pi * xyz[mask, 1] / (Ly * 10)
-        for acc, v in ((cx, np.cos(ax)), (sx, np.sin(ax)), (cy, np.cos(ay)), (sy, np.sin(ay)), (na, 1.0)):
-            acc += np.bincount(gi, np.broadcast_to(v, gi.shape), minlength=nG + 1)
-        pairs.append(kt * (nG + 1) + gi)                    # (column, grain) key
-        bins.append((mask, kt, kv, gi))
-    del coords
-    files_bytes = sum(os.path.getsize(f) for f in cfiles)
-    entry["atoms_source"] = dict(coordinate_files=len(cfiles), bytes=files_bytes)
+    keys, counts = None, None
+    tt, tv = _index_type(ct.size), _index_type(cv.size)
+    for k, f in enumerate(cfiles):
+        out = {}
+        for n, dtype, count in (("mask", bool, atoms_per_file[k]), ("kt", tt, magnetic_per_file[k]),
+                                ("kv", tv, magnetic_per_file[k]), ("gi", np.int32, magnetic_per_file[k])):
+            out[n] = open(os.path.join(work, f"bin{k}.{n}.npy"), "wb")   # raw arrays after a header, for np.load's mmap
+            np.lib.format.write_array_header_1_0(out[n], dict(descr=np.lib.format.dtype_to_descr(np.dtype(dtype)),
+                                                              fortran_order=False, shape=(count,)))
+        for t, xyz, g in vp.coord_chunks(f):
+            mask = magnetic(t)
+            kt, kv = grid.indices(xyz[mask])
+            gi = gindex[np.clip(g[mask], 0, len(gindex) - 1)] if have_ids else np.full(mask.sum(), nG)
+            ct += np.bincount(kt, minlength=ct.size)
+            cv += np.bincount(kv, minlength=cv.size)
+            ax, ay = 2 * np.pi * xyz[mask, 0] / (Lx * 10), 2 * np.pi * xyz[mask, 1] / (Ly * 10)
+            for acc, v in ((cx, np.cos(ax)), (sx, np.sin(ax)), (cy, np.cos(ay)), (sy, np.sin(ay)), (na, 1.0)):
+                acc += np.bincount(gi, np.broadcast_to(v, gi.shape), minlength=nG + 1)
+            if have_ids and nG:
+                keys, counts = _merge_counts(keys, counts, kt.astype(np.int64) * (nG + 1) + gi)   # (column, grain)
+            for n, a in (("mask", mask), ("kt", kt.astype(tt)), ("kv", kv.astype(tv)), ("gi", gi.astype(np.int32))):
+                a.tofile(out[n])
+        for fh in out.values():
+            fh.close()
+    entry["atoms_source"] = dict(coordinate_files=len(cfiles), bytes=sum(os.path.getsize(f) for f in cfiles))
 
     # grain map: the grain of the magnetic atoms in each column (columns hold one grain in a columnar film; the
     # majority grain otherwise); -1 = no magnetic atom
     if have_ids and nG:
-        key, cnt = np.unique(np.concatenate(pairs), return_counts=True)
-        col, gr = key // (nG + 1), key % (nG + 1)
-        order = np.lexsort((-cnt, col))                   # per column, most atoms first
+        col, gr = keys // (nG + 1), keys % (nG + 1)
+        order = np.lexsort((-counts, col))                # per column, most atoms first
         col, gr = col[order], gr[order]
         first = np.r_[True, col[1:] != col[:-1]]
         gm = np.full(grid.ny * grid.nx, -1, np.int64)
@@ -301,7 +414,6 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
         gm.astype(np.int16).tofile(os.path.join(out_dir, "grain_map.i16"))
         entry["grain_map"] = dict(nx=grid.nx, ny=grid.ny, pitch_nm=grid.p * grid.tf / 10,
                                   mixed_columns=int(len(col) - first.sum()))
-    del pairs
     # periodic-aware centres (circular means) and magnetic atom counts replace grain-coordinates.txt values,
     # which include non-magnetic atoms assigned to a grain
     ok = na[:nG] > 0
@@ -315,7 +427,61 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
     if have_ids:
         G["magnetic_atoms"] = na[:nG].astype(int).tolist()
         G.pop("outline", None)
+    np.save(os.path.join(work, "ct.npy"), ct)
+    np.save(os.path.join(work, "cv.npy"), cv)
+    return dict(grid=grid.__dict__, have_ids=have_ids, ok=ok.tolist(), na=na[:nG].tolist(), max_atoms=max(atoms_per_file))
 
+
+def _save_json(path, obj):
+    with open(path + ".tmp", "w") as f:
+        json.dump(obj, f)
+    os.replace(path + ".tmp", path)
+
+
+SAVE_EVERY = 60     # seconds between saves of a run's snapshot progress (for resuming an interrupted reduce)
+
+
+def _save_progress(path, done, min_m, q_max, checks, bad):
+    with open(path + ".tmp", "wb") as f:
+        np.savez(f, done=np.array(sorted(done), np.int64), min_m=min_m, q_max=q_max,
+                 checks=np.array(checks, np.float64).reshape(-1, 3), bad=np.array(sorted(bad), np.int64))
+    os.replace(path + ".tmp", path)
+
+
+def _until_worker_lost(results):
+    """A worker killed from outside, nearly always for lack of memory, stops the reduce with advice, not a traceback."""
+    try:
+        yield from results
+    except BrokenProcessPool:
+        raise SystemExit("A snapshot worker was killed, most likely because memory ran out. Run the same command to carry "
+                         "on, with fewer workers (-j) or a lower memory budget (--mem).") from None
+
+
+def reduce_atoms(dirs, out_dir, entry, series=None, volume=True, every=1, workers=None, layer_factor=None, opts=None,
+                 work=None):
+    """From the atom coordinates: exact top-down grain map, grain centres; then bin every spin snapshot onto the
+    grids and check each snapshot's per-grain mean spin against grain.txt at the same time step. work: folder for
+    the per-atom indices and the progress, which an interrupted reduce carries on from."""
+    run_dir = dirs[0]                                     # the jobs of a run share its atoms
+    cfiles = vp.coord_files(run_dir)
+    if not cfiles:
+        return
+    opts = opts or {}
+    state_file = os.path.join(work, "atoms.json")
+    if os.path.exists(state_file):
+        A = json.load(open(state_file))
+        entry.clear()
+        entry.update(A["entry"])
+        log("  coordinates already read by the interrupted reduce")
+    else:
+        A = _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor)
+        A["entry"] = entry
+        _save_json(state_file, A)
+    grid = Grid.__new__(Grid)
+    grid.__dict__.update(A["grid"])
+    have_ids, ok, na = A["have_ids"], np.array(A["ok"], bool), np.array(A["na"])
+    nG = len(entry["grains"]["id"])
+    ct, cv = np.load(os.path.join(work, "ct.npy")), np.load(os.path.join(work, "cv.npy"))
     if not opts.get("snapshots", True):
         log("  spin snapshots left out (--no-snapshots)")
         return
@@ -329,39 +495,56 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
     np.minimum(ct, 255).astype(np.uint8).tofile(os.path.join(out_dir, "top_count.u8"))
     np.minimum(cv, 255).astype(np.uint8).tofile(os.path.join(out_dir, "vol_count.u8"))
     bits = opts.get("precision", 8)
-    _W.update(grid=grid, bins=bins, ct=ct, cv=cv, volume=volume, n_grains=nG, bits=bits,
-              mask_index=[np.cumsum(mask) - 1 for mask, *_ in bins])
-    jobs = [(i, files, out_dir) for i, _, files, _ in snaps]
+    state = dict(grid=grid, volume=volume, n_grains=nG, bits=bits, work=work, n_files=len(cfiles))
     step_of = {i: int(round(t / entry["dt"])) for i, t, _, _ in snaps}
-    workers = workers or min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
     min_m = np.full(ct.size, np.inf, np.float32)
-    checks, q_max, t0, bad = [], 0.0, time.time(), set()
+    checks, q_max, t0, bad, done = [], 0.0, time.time(), set(), set()
+    progress = os.path.join(work, "progress.npz")
+    if os.path.exists(progress):
+        with np.load(progress) as z:
+            done, bad = set(z["done"].tolist()), set(z["bad"].tolist())
+            min_m, q_max, checks = z["min_m"], float(z["q_max"]), [tuple(c) for c in z["checks"].tolist()]
+        log(f"  carrying on: {len(done)} of {len(snaps)} snapshots done by the interrupted reduce")
+    jobs = [(i, files, out_dir) for i, _, files, _ in snaps if i not in done]
     windowed = any(w for *_, w in all_snaps)
     if windowed:
         log("  window snapshots (hamr:active-window): read in order, each updating the previous one")
-    with contextlib.nullcontext() if windowed else multiprocessing.get_context("fork").Pool(workers) as pool:
-        results = _window_series(all_snaps, out_dir, {i for i, *_ in snaps}) if windowed else \
-            pool.imap_unordered(_bin_snapshot, jobs)
-        for n, (idx, m, gs, q_err) in enumerate(results, 1):
+        _init_worker(state)
+        pool = contextlib.nullcontext()
+    else:
+        each = worker_memory(grid, A["max_atoms"], volume, bits)
+        n, why = worker_count(len(jobs) or 1, each, workers, opts.get("mem"))
+        log(f"  {n} snapshot workers ({why})")
+        pool = ProcessPoolExecutor(n, multiprocessing.get_context("spawn"), _init_worker, (state,))
+    saved = time.time()
+    with pool as P:
+        results = _window_series(all_snaps, out_dir, {j[0] for j in jobs}) if windowed else \
+            (f.result() for f in as_completed([P.submit(_bin_snapshot, j) for j in jobs]))
+        for n, (idx, m, gs, q_err) in enumerate(_until_worker_lost(results), 1):
             if m is None:
                 log(f"  WARNING: snapshot {idx} skipped: {q_err}")
                 bad.add(idx)
+                done.add(idx)
                 continue
+            done.add(idx)
             np.minimum(min_m, m, out=min_m)
             q_max = max(q_max, q_err)
-            if grain_m is not None and have_ids:
+            if series is not None and have_ids:
                 # per-grain means against grain.txt at the same step (they agree exactly then), else one step
                 # earlier: VAMPIRE writes snapshot k at step k * rate + 1, one step after the grain row of that output
                 for lag in (0, 1):
-                    f = np.nonzero(grain_steps == step_of[idx] - lag)[0]
-                    if len(f):
-                        ref = grain_m[f[0], :, :3] * grain_m[f[0], :, 3:4]       # direction x |m|
-                        mine = (gs[:, :nG] / np.maximum(na[:nG], 1)).T
+                    frame = series["frames"].get(step_of[idx] - lag)
+                    if frame is not None:
+                        ref = frame[:, :3] * frame[:, 3:4]                       # direction x |m|
+                        mine = (gs[:, :nG] / np.maximum(na, 1)).T
                         checks.append((idx, lag, float(np.abs(mine - ref)[ok].max())))
                         break
             if n % max(1, len(jobs) // 20) == 0 or n == len(jobs):
                 el = time.time() - t0
                 log(f"  snapshot {n}/{len(jobs)} ({el:.0f} s, ~{el / n * (len(jobs) - n):.0f} s left)")
+            if time.time() - saved > SAVE_EVERY:
+                _save_progress(progress, done, min_m, q_max, checks, bad)
+                saved = time.time()
     _W.clear()
     min_m[ct == 0] = 0
     np.rint(np.clip(min_m, 0, 1) * 255).astype(np.uint8).tofile(os.path.join(out_dir, "min_m.u8"))
@@ -381,8 +564,9 @@ def reduce_atoms(dirs, out_dir, entry, grain_steps=None, grain_m=None, volume=Tr
 
 
 # ------------------------------------------------------------------------------------------------ tables
-def reduce_tables(dirs, out_dir, entry, opts=None):
-    """'output' and grain.txt of a run (its segments joined), grain list and outlines."""
+def reduce_tables(dirs, out_dir, entry, opts=None, check_steps=frozenset()):
+    """'output' and grain.txt of a run (its segments joined), grain list and outlines. Returns (grain.txt leading columns,
+    {acc: GrainAccumulator, frames: float32 frames at check_steps}), or (None, None) without a grain series."""
     run_dir, dt = dirs[0], entry["dt"]
     parts = [vp.read_output(d) for d in dirs]
     cols = parts[0][0]
@@ -409,46 +593,135 @@ def reduce_tables(dirs, out_dir, entry, opts=None):
     if not all(os.path.exists(os.path.join(d, "grain.txt")) for d in dirs):
         return None, None
     log("  parsing grain.txt")
-    leads, ms = [], []
-    for d in dirs:
-        try:
-            cols, m = vp.read_grain_file(d, len(gc))
-        except ValueError as err:
-            log(f"  WARNING: grain.txt not used, so no grain magnetisation views: {err}")
-            entry["notes"] = entry.get("notes", []) + [f"grain.txt not used: {err}"]
-            return None, None
-        if "time" in cols:
-            t = cols["time"]
-        elif "step" in cols:
-            t = cols["step"] * dt
-        else:   # neither grain:real-time nor grain:time-steps: frames are written every grain:output-rate steps
-            if len(dirs) > 1:
-                raise SystemExit(f"{dirs}: grain.txt needs grain:real-time or grain:time-steps to join the jobs")
-            rate = vp.Input(d).num("grain:output-rate", 1, "int")
-            t = (np.arange(len(m)) + 1) * rate * dt
-            entry["grain_time_note"] = "grain.txt has no time column: frame times assumed from grain:output-rate"
-        leads.append(np.stack([t, cols.get("temperature", np.full(len(m), np.nan))], axis=1))
-        ms.append(m)
-    lead = _join_rows(leads, [l[:, 0] for l in leads], dirs, dt)
-    m = _join_rows(ms, [l[:, 0] for l in leads], dirs, dt)
     opts = opts or {}
+    try:
+        return _stream_grains(dirs, out_dir, entry, len(gc), dt, opts, check_steps)
+    except ValueError as err:
+        for f in ("grains.i16", "grains.f32"):
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(out_dir, f + ".tmp"))
+        log(f"  WARNING: grain.txt not used, so no grain magnetisation views: {err}")
+        entry["notes"] = entry.get("notes", []) + [f"grain.txt not used: {err}"]
+        return None, None
+
+
+class GrainAccumulator:
+    """What the write analysis needs from the grain series, gathered frame by frame so the series itself never has
+    to be in memory (float32, as the analysis has always used). A grain's decision depends on the sign of its final
+    m_z, unknown until the last frame, so both signs are followed: last frame below the threshold in that direction,
+    and |m| on the frame after it."""
+
+    def __init__(self, n_grains, decision):
+        self.decision = decision
+        self.n = 0
+        self.final = np.zeros(n_grains, np.float32)
+        self.last_m = np.zeros(n_grains, np.float32)
+        self.min_m = np.full(n_grains, np.inf, np.float32)
+        self.last = np.full((2, n_grains), -1, np.int64)            # [0]: direction +, [1]: direction -
+        self.after = np.zeros((2, n_grains), np.float32)
+
+    def add(self, m):
+        mz, ml = m[:, 2] * m[:, 3], m[:, 3]
+        np.minimum(self.min_m, ml, out=self.min_m)
+        for i, v in enumerate((mz, -mz)):
+            arrived = self.last[i] == self.n - 1
+            self.after[i][arrived] = ml[arrived]
+            self.last[i][v < self.decision] = self.n
+        self.final, self.last_m = mz, ml
+        self.n += 1
+
+    def outcome(self):
+        """(final mz, lowest |m|, any frame below the threshold, decision frame, |m| at that frame), per grain."""
+        final = self.final
+        d = np.where(final < 0, 1, 0)
+        i = np.arange(len(final))
+        last = np.where(final == 0, self.n - 1, self.last[d, i])    # direction 0: m_z x 0 is below every threshold
+        last = np.where(np.isnan(final), -1, last)
+        dec = np.minimum(np.where(last >= 0, last + 1, 0), self.n - 1)
+        m_dec = np.where(last + 1 >= self.n, self.last_m, self.after[d, i])
+        return final, self.min_m, last >= 0, dec, m_dec
+
+    ARRAYS = ("final", "last_m", "min_m", "last", "after")
+
+
+def _stream_grains(dirs, out_dir, entry, n_grains, dt, opts, check_steps):
+    """Write the grain series from the runs' grain.txt, one frame in memory at a time. Returns (lead columns [frames,
+    2], {accumulator, frames at check_steps}), or raises ValueError for an unusable grain.txt."""
     every = opts.get("grain_every", 1)
-    if every > 1:   # thin the frames (the last one is kept); the write analysis then uses the kept frames too
-        keep = np.r_[np.arange(0, len(m) - 1, every), len(m) - 1]
-        lead, m = lead[keep], m[keep]
-    # stored from grain.txt's values (float64): quantising a float32 copy could miss the half-step bound
-    if opts.get("grain_precision", 16) == 32:
-        m.astype(np.float32).tofile(os.path.join(out_dir, "grains.f32"))
-    else:
-        np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16).tofile(os.path.join(out_dir, "grains.i16"))
-    m = m.astype(np.float32)                                # the analysis and checks work on float32, as before
+    f32 = opts.get("grain_precision", 16) == 32
+    name = os.path.join(out_dir, "grains.f32" if f32 else "grains.i16")
+    th = dict(THRESHOLDS, **(opts.get("thresholds") or {}))
+    acc = GrainAccumulator(n_grains, th["decision"])
+    stops = _resume_steps(dirs)[1:] + [None]
+    lead, frames, count, held = [], {}, 0, None
+
+    def keep(row_lead, m):
+        lead.append(row_lead)
+        # stored from grain.txt's values (float64): quantising a float32 copy could miss the half-step bound
+        (m.astype(np.float32) if f32 else np.rint(np.clip(m, -1, 1) * 32767).astype(np.int16)).tofile(out)
+        m32 = m.astype(np.float32)                              # the analysis and checks work on float32, as before
+        acc.add(m32)
+        step = int(np.rint(row_lead[0] / dt))
+        if step in check_steps and step not in frames:
+            frames[step] = m32
+
+    with open(name + ".tmp", "wb") as out:
+        for d, stop in zip(dirs, stops):
+            names, rows = vp.grain_rows(d, n_grains)
+            ti, si, ci = (names.index(k) if k in names else None for k in ("time", "step", "temperature"))
+            if ti is None and si is None:   # neither grain:real-time nor grain:time-steps: frames every output-rate steps
+                if len(dirs) > 1:
+                    raise SystemExit(f"{dirs}: grain.txt needs grain:real-time or grain:time-steps to join the jobs")
+                rate = vp.Input(d).num("grain:output-rate", 1, "int")
+                entry["grain_time_note"] = "grain.txt has no time column: frame times assumed from grain:output-rate"
+            for i, v in enumerate(rows):
+                t = v[ti] if ti is not None else v[si] * dt if si is not None else (i + 1) * rate * dt
+                if stop is not None and t / dt > stop + 0.5:
+                    continue
+                row_lead = (t, v[ci] if ci is not None else np.nan)
+                m = v[len(names):].reshape(n_grains, 4)
+                if count % every == 0:      # thinned frames: the last one is kept too (below); the analysis uses the kept frames
+                    keep(row_lead, m)
+                    held = None
+                else:
+                    held = (row_lead, m)
+                count += 1
+        if held:
+            keep(*held)
+    os.replace(name + ".tmp", name)
+    lead = np.array(lead, np.float64).reshape(-1, 2)
     lead.tofile(os.path.join(out_dir, "grain_lead.f64"))
-    entry["grain_series"] = dict(frames=len(m), lead=["time", "temperature"], columns=list(cols))
-    if opts.get("grain_precision", 16) == 32:
+    entry["grain_series"] = dict(frames=len(lead), lead=["time", "temperature"], columns=names)
+    if f32:
         entry["grain_series"]["dtype"] = "f32"
     if every > 1:
         entry["grain_series"]["every"] = every
-    return lead, m
+    if len(lead) * n_grains * 8 * (2 if f32 else 1) > GRAIN_WHOLE_MAX:
+        write_grain_overview(name, out_dir, entry, n_grains, f32)
+    return lead, dict(acc=acc, frames=frames)
+
+
+GRAIN_WHOLE_MAX = 512e6    # above this size (bytes) the viewer reads the grain series in blocks, not all at once
+OVERVIEW_BINS = 1024       # time bins of the overview of such a series
+
+
+def write_grain_overview(name, out_dir, entry, n_grains, f32):
+    """grains_overview.i16 [bins, grains, 4]: lowest and highest m_z = mz x |m|, lowest and highest |m| in each time bin of
+    a long grain series, x 32767, so the viewer's whole-run views need not read it all and miss no short event."""
+    frames = entry["grain_series"]["frames"]
+    dtype = np.float32 if f32 else np.int16
+    scale = 1.0 if f32 else 1.0 / 32767
+    bins = min(OVERVIEW_BINS, frames)
+    row_bytes = n_grains * 4 * np.dtype(dtype).itemsize
+    with open(os.path.join(out_dir, "grains_overview.i16"), "wb") as f:
+        for b in range(bins):
+            f0, f1 = b * frames // bins, (b + 1) * frames // bins
+            part = np.fromfile(name, dtype, (f1 - f0) * n_grains * 4, offset=f0 * row_bytes).reshape(f1 - f0, n_grains, 4)
+            mz, ml = part[:, :, 2] * scale * part[:, :, 3] * scale, part[:, :, 3] * scale
+            row = np.stack([mz.min(0), mz.max(0), ml.min(0), ml.max(0)], axis=1)
+            np.rint(np.clip(row, -1, 1) * 32767).astype(np.int16).tofile(f)
+    entry["grain_series"]["overview"] = dict(bins=bins)
+    log(f"  grain series {frames * row_bytes / 1e9:.1f} GB: the viewer reads it in blocks; overview of {bins} time bins written")
 
 
 def reduce_dipole(run_dir, out_dir, entry):
@@ -476,27 +749,27 @@ def reduce_dipole(run_dir, out_dir, entry):
 
 
 # ------------------------------------------------------------------------------------------------ write analysis
-def write_analysis(h, entry, lead, m, Tc=None, thresholds=None):
+def write_analysis(h, entry, lead, series, Tc=None, thresholds=None):
     """Per-grain outcome of the write: intended polarity, final state, decision moment and its circumstances."""
     th = dict(THRESHOLDS, **(thresholds or {}))
     DECISION, HEATED, SETTLED, FULL_FIELD = (th[k] for k in ("decision", "heated", "settled", "full_field"))
     g = entry["grains"]
     gx, gy = np.array(g["x"]), np.array(g["y"])
     steps = np.rint(lead[:, 0] / h.dt).astype(np.int64)
-    mz = m[:, :, 2] * m[:, :, 3]
-    T = h.temperature(gx[None, :], gy[None, :], steps[:, None])
     B = h.field(steps) * h.field_uz                                  # z field inside the box
-    final = mz[-1]
+    final, minM, any_below, dec, m_dec = series["acc"].outcome()
     sgn = np.sign(final)
-    below = mz * sgn < DECISION
-    heated = (m[:, :, 3].min(0) < HEATED) & below.any(0)
-    # decision frame: the frame after the last one below the threshold in the final direction
-    dec = np.where(below.any(0), len(steps) - np.argmax(below[::-1], axis=0), 0)
-    dec = np.minimum(dec, len(steps) - 1)
+    heated = (minM < HEATED) & any_below
+    # laser temperature at the grain centres: at the decision frame (the frame after the last one below the threshold
+    # in the final direction) and the highest over the run, a block of frames at a time
+    Tdec = h.temperature(gx, gy, steps[dec])
+    peak = np.full(len(gx), -np.inf)
+    for a in range(0, len(steps), 4096):
+        np.maximum(peak, h.temperature(gx[None, :], gy[None, :], steps[a:a + 4096, None]).max(0), out=peak)
 
     if Tc is None:   # effective freezing temperature: median centre temperature at the decision of heated grains
         sel = heated & (np.abs(final) >= SETTLED)
-        Td = T[dec[sel], np.nonzero(sel)[0]]
+        Td = Tdec[sel]
         Td = Td[Td > h.Tmin + 0.05 * (h.Tmax - h.Tmin)]     # decisions under the laser, not thermal flips far from it
         Tc = float(np.median(Td)) if len(Td) else None
         entry["Tc_source"] = "median grain-centre laser temperature at the decision moment of heated grains"
@@ -514,7 +787,7 @@ def write_analysis(h, entry, lead, m, Tc=None, thresholds=None):
         pol = seq[t * h.bits_per_track + b] if 0 <= b < h.bits_per_track and t * h.bits_per_track + b < len(seq) else 0
         want = int(np.sign(pol * h.field_uz))                         # the z direction the field asked for
         r = dict(track=t, bit=b, intended=want, final=round(float(final[i]), 4),
-                 peakT=round(float(T[:, i].max()), 1), minM=round(float(m[:, i, 3].min()), 4))
+                 peakT=round(float(peak[i]), 1), minM=round(float(minM[i]), 4))
         if not heated[i]:
             r["category"] = "unheated"
         elif abs(final[i]) < SETTLED:
@@ -527,7 +800,7 @@ def write_analysis(h, entry, lead, m, Tc=None, thresholds=None):
             r["category"] = ("zero-field" if bd == 0 else "reversal" if abs(bd) < FULL_FIELD * h.Hpeak
                              else "full-field")
             r.update(decision_frame=d, decision_step=int(steps[d]), Bz_dec=round(bz, 3), B_dec=round(bd, 3),
-                     T_dec=round(float(T[d, i]), 1), m_dec=round(float(m[d, i, 3]), 4),
+                     T_dec=round(float(Tdec[i]), 1), m_dec=round(float(m_dec[i]), 4),
                      lag_dec=round(float(hx - gx[i]), 3), dy=round(float(gy[i] - hy), 3))
         r["correct"] = bool(r["category"] not in ("unheated", "undecided") and want != 0 and sgn[i] == want)
         res.append(r)
@@ -576,39 +849,105 @@ def bundle_runs(man):
     return [(s, man["stages"][s]) for s in ("relax", "write", "read") if s in man["stages"]]
 
 
-def _prepare_out(out):
-    """Make out ready for a new bundle: an existing bundle's run folders and manifest are removed (so no files of
-    an earlier reduction stay behind); any other non-empty directory is refused."""
+def _prepare_out(out, request):
+    """Make out ready for a bundle; True if an interrupted reduce of the same runs with the same options carries on.
+    Otherwise an existing bundle's run folders and manifest are removed (so no files of an earlier reduction stay
+    behind); any other non-empty directory is refused."""
+    state = os.path.join(out, WORK, "state.json")
+    if os.path.exists(state) and json.load(open(state)) == request:
+        return True
     if os.path.isdir(out) and os.listdir(out):
         mp = os.path.join(out, "manifest.json")
-        if not os.path.exists(mp):
+        work = os.path.join(out, WORK)
+        if not os.path.exists(mp) and not os.path.isdir(work):
             raise SystemExit(f"{out} is not empty and holds no hamrvis bundle: choose a new or empty directory")
-        for rid, _ in bundle_runs(json.load(open(mp))):
-            if re.fullmatch(r"[A-Za-z0-9._-]+", rid) and rid not in (".", ".."):   # never leave the bundle
-                shutil.rmtree(os.path.join(out, rid), ignore_errors=True)
-        os.remove(mp)
-    os.makedirs(out, exist_ok=True)
+        if os.path.isdir(work):                           # an unfinished reduce's folder holds only what it wrote
+            for name in os.listdir(out):
+                shutil.rmtree(os.path.join(out, name)) if os.path.isdir(os.path.join(out, name)) else os.remove(os.path.join(out, name))
+        elif os.path.exists(mp):
+            for rid, _ in bundle_runs(json.load(open(mp))):
+                if re.fullmatch(r"[A-Za-z0-9._-]+", rid) and rid not in (".", ".."):   # never leave the bundle
+                    shutil.rmtree(os.path.join(out, rid), ignore_errors=True)
+            os.remove(mp)
+    os.makedirs(os.path.join(out, WORK), exist_ok=True)
+    _save_json(state, request)
+    return False
 
 
 # ------------------------------------------------------------------------------------------------ driver
+def _tables_stage(r, sd, e, opts, work):
+    """reduce_tables, or its saved results if an interrupted reduce got past it (grain.txt may take long to parse)."""
+    state = os.path.join(work, "tables.json")
+    if os.path.exists(state):
+        s = json.load(open(state))
+        e.clear()
+        e.update(s["entry"])
+        log("  grain.txt already parsed by the interrupted reduce")
+        if not s["series"]:
+            return None, None
+        with np.load(os.path.join(work, "tables.npz")) as z:
+            acc = GrainAccumulator(len(e["grains"]["id"]), s["decision"])
+            acc.n = s["n"]
+            for k in acc.ARRAYS:
+                setattr(acc, k, z[k])
+            frames = dict(zip(z["frame_steps"].tolist(), z["frames"]))
+            return z["lead"], dict(acc=acc, frames=frames)
+    check_steps = set()
+    if opts.get("snapshots", True) and vp.coord_files(r.dir):
+        for _, t, *_ in run_snapshots(r.dirs, e["dt"]):
+            step = int(round(t / e["dt"]))
+            check_steps.update((step, step - 1))
+    lead, series = reduce_tables(r.dirs, sd, e, opts, check_steps)
+    if series:
+        acc = series["acc"]
+        steps = sorted(series["frames"])
+        frames = np.array([series["frames"][k] for k in steps], np.float32).reshape(len(steps), len(e["grains"]["id"]), 4)
+        with open(os.path.join(work, "tables.tmp"), "wb") as f:
+            np.savez(f, lead=lead, frame_steps=np.array(steps, np.int64), frames=frames,
+                     **{k: getattr(acc, k) for k in acc.ARRAYS})
+        os.replace(os.path.join(work, "tables.tmp"), os.path.join(work, "tables.npz"))
+    _save_json(state, dict(entry=e, series=bool(series), n=series["acc"].n if series else 0,
+                           decision=series["acc"].decision if series else 0))
+    return lead, series
+
+
 def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, layer_factor=None, order=None,
            opts=None):
     """opts (all optional, defaults give today's bundle): precision 8|16|32 (snapshot grids), grain_precision
     16|32, grain_every, snapshots (False: leave the spin snapshots out), top_max, layer_max, thresholds
-    {decision, heated, settled, full_field} of the write analysis."""
+    {decision, heated, settled, full_field} of the write analysis, mem (bytes: memory budget for the snapshot
+    workers; default what is free). Run again with the same arguments after an interruption to carry on."""
     opts = opts or {}
     runs = rn.find(paths, order)
     if not runs:
         raise SystemExit(f"no run directories (folders with an 'input' file) in {paths}")
-    _prepare_out(out)
     dirs = [os.path.abspath(d) for r in runs for d in r.dirs]
-    manifest = dict(format="hamrvis-bundle", version=FORMAT_VERSION, created=time.strftime("%Y-%m-%d %H:%M:%S"),
-                    name=name or os.path.basename(os.path.commonpath(dirs) if len(dirs) > 1 else dirs[0]), runs=[])
+    # anything that changes the bundle; the same request again carries on from where an interrupted reduce stopped
+    request = dict(version=FORMAT_VERSION, dirs=dirs, every=every, volume=volume, Tc=Tc, name=name, layer_factor=layer_factor,
+                   opts={k: v for k, v in opts.items() if k not in ("workers", "mem")},
+                   inputs=[[os.path.getsize(f), int(os.path.getmtime(f))] for f in
+                           (os.path.join(d, vp.input_name(d)) for d in dirs)])
+    resuming = _prepare_out(out, request)
+    mp = os.path.join(out, "manifest.json")
+    if resuming and os.path.exists(mp):
+        manifest = json.load(open(mp))
+    else:
+        manifest = dict(format="hamrvis-bundle", version=FORMAT_VERSION, created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        name=name or os.path.basename(os.path.commonpath(dirs) if len(dirs) > 1 else dirs[0]), runs=[])
+    if resuming:
+        log(f"carrying on the interrupted reduce in {out}: {len(manifest['runs'])} of {len(runs)} runs were complete")
+    finished = {e["id"] for e in manifest["runs"]}
     last_hamr = None
     for r in runs:
+        if r.id in finished:
+            if r.type == "hamr":
+                last_hamr = r.id
+            continue
         log(f"{r.id} ({r.type}): " + ", ".join(r.dirs))
         sd = os.path.join(out, r.id)
-        os.makedirs(sd)
+        os.makedirs(sd, exist_ok=True)
+        work = os.path.join(out, WORK, r.id)
+        os.makedirs(work, exist_ok=True)
         run = r.dir
         inp = vp.Input(run)
         e = dict(id=r.id, type=r.type, title=r.title, source=os.path.abspath(run),
@@ -629,14 +968,13 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
         e["source_files"] = {f: [os.path.getsize(os.path.join(run, f)), int(os.path.getmtime(os.path.join(run, f)))]
                              for f in (inp.name, vp.output_name(run), "grain.txt", "dipole-field.txt")
                              if f and os.path.exists(os.path.join(run, f))}
-        lead, m = reduce_tables(r.dirs, sd, e, opts)
-        gsteps = np.rint(lead[:, 0] / e["dt"]).astype(np.int64) if lead is not None else None
-        reduce_atoms(r.dirs, sd, e, gsteps, m, volume, every, workers, layer_factor, opts)
+        lead, series = _tables_stage(r, sd, e, opts, work)
+        reduce_atoms(r.dirs, sd, e, series, volume, every, workers, layer_factor, opts, work)
         if r.type == "hamr":
             h = vp.Hamr(run, r.dirs)
             e["hamr"] = h.params()
             if lead is not None:
-                write_analysis(h, e, lead, m, Tc, opts.get("thresholds"))
+                write_analysis(h, e, lead, series, Tc, opts.get("thresholds"))
             last_hamr = r.id
         last = r.dirs[-1]                              # field maps are written at the end of a run
         if os.path.exists(os.path.join(last, "dipole-field.txt")):
@@ -644,6 +982,8 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
             reduce_dipole(last, sd, e)
         manifest["runs"].append(e)
         _write_manifest(out, manifest)                 # after each run, so a partial bundle opens
+        shutil.rmtree(work)
     share_grain_map(out, manifest)
+    shutil.rmtree(os.path.join(out, WORK))
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     log(f"bundle {out}: {size / 1e6:.1f} MB")

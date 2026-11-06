@@ -4,6 +4,7 @@ Lengths are in nm, times in s, fields in T, temperatures in K unless a name says
 Everything here only reads files; the bundle layout lives in reduce.py.
 """
 import glob
+import itertools
 import math
 import os
 import re
@@ -198,9 +199,12 @@ def grain_outlines(coords, shapes):
     if not shapes:
         return [None] * len(coords)
     cen = np.array([s.mean(axis=0) for s in shapes])
+    lo, hi = np.array([s.min(axis=0) for s in shapes]), np.array([s.max(axis=0) for s in shapes])
     res = []
     for x, y in coords[:, 1:3]:
-        inside = [s for s in shapes if _contains(s, x, y)]
+        # only cells whose bounding box holds the point can contain it
+        near = np.nonzero((lo[:, 0] <= x) & (x <= hi[:, 0]) & (lo[:, 1] <= y) & (y <= hi[:, 1]))[0]
+        inside = [shapes[i] for i in near if _contains(shapes[i], x, y)]
         res.append(inside[0] if len(inside) == 1 else shapes[int(np.argmin(np.hypot(*(cen - (x, y)).T)))])
     return res
 
@@ -237,23 +241,38 @@ def grain_columns(run_dir, n_grains):
     return names, need
 
 
-def read_grain_file(run_dir, n_grains):
-    """Per-frame grain data from grain.txt (see grain_columns).
-    Returns ({name: float64 [frames]} of the columns before the magnetisation block, float64 [frames, grains, 4])."""
+def grain_rows(run_dir, n_grains):
+    """(names of the columns before the magnetisation block, iterator of float64 rows of grain.txt, each cut to the
+    columns needed), one row in memory at a time: grain.txt can be tens of GB. A short or damaged last row (a job
+    stopped while writing it) is left out; one anywhere else raises ValueError."""
     names, need = grain_columns(run_dir, n_grains)
     path = os.path.join(run_dir, "grain.txt")
-    try:
-        d = np.loadtxt(path, comments="#", usecols=range(need), ndmin=2, dtype=np.float64)
-    except ValueError:
-        rows = [l for l in open(path, errors="replace") if l.strip() and not l.startswith("#")]
-        try:   # a job stopped while writing its last row: leave that row out
-            d = np.loadtxt(rows[:-1], usecols=range(need), ndmin=2, dtype=np.float64)
-        except ValueError:
-            raise ValueError("grain.txt has a short or damaged row (a copy caught mid-transfer?)") from None
-        print(f"WARNING: {path}: last row incomplete (job stopped while writing it): left out")
-    lead = {n: d[:, i] for i, n in enumerate(names)}
-    m = d[:, len(names):].reshape(len(d), n_grains, 4)
-    return lead, m
+
+    def parse(lines):
+        return np.loadtxt(lines, usecols=range(need), ndmin=2, dtype=np.float64)
+
+    def rows():
+        with open(path, errors="replace") as f:
+            while True:
+                batch = list(itertools.islice(f, 16))
+                if not batch:
+                    return
+                batch = [l for l in batch if l.strip() and not l.startswith("#")]
+                if not batch:
+                    continue
+                try:
+                    yield from parse(batch)
+                except ValueError:                        # find the row, which may only be a last one left half-written
+                    for k, line in enumerate(batch):
+                        try:
+                            v = parse([line])
+                        except ValueError:
+                            if any(l.strip() for l in batch[k + 1:]) or any(l.strip() for l in f):
+                                raise ValueError("grain.txt has a short or damaged row (a copy caught mid-transfer?)") from None
+                            print(f"WARNING: {path}: last row incomplete (job stopped while writing it): left out")
+                            return
+                        yield v[0]
+    return names, rows()
 
 
 def read_dipole_cells(run_dir):
@@ -293,48 +312,66 @@ def coord_files(run_dir):
     return [old] if os.path.exists(old) else []
 
 
-def read_coords(path):
-    """(type int32 [n], xyz float64 [n, 3] in A, grain int32 [n] or None) of one coordinate data file."""
-    if _is_binary(path):
-        with open(path, "rb") as f:
-            n = int(np.fromfile(f, np.uint64, 1)[0])
-            typ = np.fromfile(f, np.int32, n)
-            np.fromfile(f, np.int32, n)                     # category
-            xyz = np.fromfile(f, np.float64, 3 * n)
-            grain = np.fromfile(f, np.int32, n)
-        if len(typ) != n or len(xyz) != 3 * n:
-            raise IOError(f"{path}: truncated (fewer than its {n} atoms), copy caught mid-transfer?")
-        xyz = xyz.reshape(n, 3)
-        return typ, xyz, (grain if len(grain) == n else None)
-    d = _text_data(path)
-    return d[:, 0].astype(np.int32), d[:, 2:5], (d[:, 5].astype(np.int32) if d.shape[1] > 5 else None)
+CHUNK_ATOMS = 1 << 24      # atoms read at a time, so a single data file of any size fits in memory
 
 
-def _text_data(path, cols=None):
-    """Rows of a text config data file (first line: number of rows), checked to be complete."""
+def _text_chunks(path, cols=None, chunk=CHUNK_ATOMS):
+    """Rows of a text config data file (first line: number of rows) in pieces, checked to be complete."""
     with open(path) as f:
         head = f.readline().split()
+        got = 0
         try:
             n = int(head[0])
-            d = np.loadtxt(f, ndmin=2, usecols=range(cols) if cols else None)
+            while got < n:
+                d = np.loadtxt(f, ndmin=2, usecols=range(cols) if cols else None, max_rows=chunk)
+                if not len(d):
+                    break
+                got += len(d)
+                yield d
+            if got == n and f.read(4096).strip():
+                got = n + 1
         except (ValueError, IndexError):
-            d = None
-    if d is None or len(d) != n:
-        got = "unreadable rows" if d is None else f"{len(d)} of {n} rows"
-        raise IOError(f"{path}: truncated or damaged text file ({got}), copy caught mid-transfer?")
-    return d
+            raise IOError(f"{path}: truncated or damaged text file (unreadable rows), copy caught mid-transfer?") from None
+    if got != n:
+        raise IOError(f"{path}: truncated or damaged text file ({got} of {n} rows), copy caught mid-transfer?")
+
+
+def coord_chunks(path, chunk=CHUNK_ATOMS):
+    """Pieces (type int32 [m], xyz float64 [m, 3] in A, grain int32 [m] or None) of one coordinate data file."""
+    if _is_binary(path):
+        n = int(np.fromfile(path, np.uint64, 1)[0])            # n, type[n], category[n], xyz[3n], grain[n] (newer files)
+        size = os.path.getsize(path)
+        if size < 8 + 32 * n:
+            raise IOError(f"{path}: truncated (fewer than its {n} atoms), copy caught mid-transfer?")
+        grains = size >= 8 + 36 * n
+        for a in range(0, n, chunk):
+            m = min(chunk, n - a)
+            yield (np.fromfile(path, np.int32, m, offset=8 + 4 * a),
+                   np.fromfile(path, np.float64, 3 * m, offset=8 + 8 * n + 24 * a).reshape(m, 3),
+                   np.fromfile(path, np.int32, m, offset=8 + 32 * n + 4 * a) if grains else None)
+    else:
+        for d in _text_chunks(path, chunk=chunk):
+            yield d[:, 0].astype(np.int32), d[:, 2:5], (d[:, 5].astype(np.int32) if d.shape[1] > 5 else None)
+
+
+def spin_chunks(path, chunk=CHUNK_ATOMS):
+    """Pieces (float64 [m, 3]) of one spin data file, in file order."""
+    if _is_binary(path):
+        n = int(np.fromfile(path, np.uint64, 1)[0])
+        if os.path.getsize(path) < 8 + 24 * n:
+            got = (os.path.getsize(path) - 8) // 24
+            raise IOError(f"{path}: truncated ({got} of {n} spins), copy caught mid-transfer?")
+        for a in range(0, n, chunk):
+            m = min(chunk, n - a)
+            yield np.fromfile(path, np.float64, 3 * m, offset=8 + 24 * a).reshape(m, 3)
+    else:
+        yield from _text_chunks(path, 3, chunk)
 
 
 def read_spins(path):
     """float64 [n, 3] spin directions of one spin data file."""
-    if _is_binary(path):
-        with open(path, "rb") as f:
-            n = int(np.fromfile(f, np.uint64, 1)[0])
-            s = np.fromfile(f, np.float64, 3 * n)
-        if len(s) != 3 * n:
-            raise IOError(f"{path}: truncated ({len(s) // 3} of {n} spins), copy caught mid-transfer?")
-        return s.reshape(n, 3)
-    return _text_data(path, 3)
+    parts = list(spin_chunks(path))
+    return np.concatenate(parts) if parts else np.zeros((0, 3))
 
 
 def read_window_spins(path):

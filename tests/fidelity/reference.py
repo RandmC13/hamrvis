@@ -143,15 +143,18 @@ def spins(run, index):
     return np.concatenate(out)
 
 
-def column_means(xyz, s, pitch_A, nx, ny):
-    """[3, ny, nx] mean spin of the atoms in each top-down column (NaN: no atom); columns are pitch_A wide on the
-    periodic film. shortcut: single-atom columns only (no coarsened grids); extend for the large-system tests."""
-    sums, count = {}, {}
-    for (x, y, _), v in zip(xyz, s):
-        key = (int(round(y / pitch_A)) % ny, int(round(x / pitch_A)) % nx)
-        sums[key] = sums.get(key, 0) + v
-        count[key] = count.get(key, 0) + 1
+def column_means(xyz, s, pitch_A, nx, ny, factor=1, sites=None):
+    """[3, ny, nx] mean spin of the atoms in each top-down column (NaN: no atom). Atoms sit on sites pitch_A apart on the
+    periodic film; a column holds factor x factor sites, so a site's column is (site index mod sites) // factor. sites:
+    (x, y) sites on the film, default nx, ny."""
+    sx, sy = sites or (nx, ny)
+    iy = np.rint(xyz[:, 1] / pitch_A).astype(np.int64) % sy // factor
+    ix = np.rint(xyz[:, 0] / pitch_A).astype(np.int64) % sx // factor
+    k = iy * nx + ix
+    count = np.bincount(k, minlength=nx * ny)
     out = np.full((3, ny, nx), np.nan)
-    for (iy, ix), v in sums.items():
-        out[:, iy, ix] = v / count[(iy, ix)]
+    for c in range(3):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            m = np.bincount(k, s[:, c], minlength=nx * ny) / count
+        out[c] = np.where(count > 0, m, np.nan).reshape(ny, nx)
     return out

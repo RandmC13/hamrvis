@@ -7,7 +7,7 @@ with a tab for each run, showing what that kind of simulation calls for, on one 
 It has two parts:
 
 1. **`hamrvis reduce`** turns finished run directories into a compact *bundle*. It runs where the data is (on the
-   cluster), so only the bundle is copied home. The 90 GB of spin snapshots of a 8.7M-atom write become about
+   cluster), so only the bundle is copied home. The 90 GB of spin snapshots of a 8.7M-atom write become
    about 2.2 GB, or about 180 MB without the per-layer data (estimated from the final snapshot).
 2. **`hamrvis view`** serves one general viewer for any bundle on `localhost` and opens it in the browser. The
    same viewer works for every run, so improvements apply to old runs too.
@@ -60,7 +60,17 @@ All optional; without them the bundle is the same as before they existed.
 | `--no-snapshots` | Leave the spin snapshots out (grain views and grain shapes stay) |
 | `--top-max P`, `--layer-max C` | Pixels per snapshot before the column map / layer grid is coarsened (4e6, 2.5e6) |
 | `--decision`, `--heated`, `--settled`, `--full-field` | Write analysis thresholds (docs/analysis.md) |
+| `-j N`, `--mem GB` | Snapshot workers, memory budget for them. Default: one per CPU of the job, as many as fit in the free memory (or what is left of the job's Slurm limit) |
 | `--input-file NAME`, `--output-file NAME` | The runs' input and output file names, if VAMPIRE was run with `--input-file` / `--output-file` and they are not found automatically (see below) |
+
+### Large runs and interruptions
+
+The reducer holds at most one frame of `grain.txt` and 16.8M atoms of a data file at a time, so a run's size is limited by
+disk, not memory: see `docs/decisions.md` (Any size) for measurements. `hamrvis inspect` estimates the memory beforehand.
+
+An interrupted reduce (time limit, out of memory, Ctrl+C) carries on when the same command is run again: finished runs and
+finished snapshots are kept, the folder `.reduce-work` inside the bundle holds what it needs meanwhile and is removed
+at the end. Different runs or options start again.
 
 ## What the run needs to write
 
@@ -135,6 +145,12 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
 
 ## Viewer
 
+- **Film window**: every lane on the film axis shows the same x range. Pinch or ctrl + wheel on a lane, the − + ↔ buttons
+  or the + - 0 keys zoom; shift + drag pans; horizontal wheel pans. The strip under the axis shows where the window is on
+  the film (drag it to move) and *follow head* keeps the head in view. A film too flat to read when fitted to the width opens
+  on its first part at its true aspect ratio; a film taller than the lane scrolls with the wheel, and its y range is
+  printed under the lane. ↔ shows the whole film, stretched in y if need be. A lane that cannot draw, or data that cannot
+  be read, says so instead of staying blank.
 - **Tabs**: one per run, in run order, at the top right (title from the kind of run, then the folder name). The
   address ends in `#<folder>`, so a run can be bookmarked; bundles made before version 2 keep `#relax`, `#write`,
   `#read`.
@@ -153,13 +169,16 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
     Atom views show the nearest snapshot; its time is printed on the image when it differs from the timeline.
   - *Transport* directly under the film: start / play / end (Home, space, End), 0.1x to 30x, step (arrow keys,
     shift for 50 frames).
-  - *x–z section*: slice through the section line from the nearest snapshot (height x2).
+  - *x–z section*: slice through the section line from the nearest snapshot (height x2 at the opening zoom; the
+    factor is printed).
   - Read stage: *stray field* B_z at a chosen sensor height, *field section* (x–z), *read-back* waveform (mean B_z
     across a reader band of chosen width) with the intended transitions.
 - **Inspector**: hover a grain, or click to keep it: outcome, decision moment and circumstances, and its life story
   (laser temperature, |m|, m_z, field felt). Click the chart to jump there.
 - **Space–time**: one row per melted grain (or all), sorted by x, time left to right; dashed: laser passes the
-  grain; tick: decision moment. Click to select the grain and jump to that time.
+  grain; tick: decision moment. Click to select the grain and jump to that time. With more frames or grains than
+  fit an image, each pixel holds the extreme value of its frames and grains furthest from the pixel before it, so a
+  short event stays visible (the same on the time line under the film).
 - **Analysis** (write): success, freezing temperature and lag, where each grain froze, outcomes by circumstance.
 - **Save PNG** stacks the lanes into one image (local viewer only).
 
@@ -171,3 +190,4 @@ as magnetisation; written-as-intended is green, wrong is ochre.
 - `docs/decisions.md`: why it is built this way, the choices made with you, and what was left out.
 - `docs/bundle-format.md`: the bundle files.
 - `docs/analysis.md`: how the write analysis classifies grains, and the head model.
+- `tests/make_large.py`: a generated run of any size, in VAMPIRE's file formats with a known answer, for scale tests.

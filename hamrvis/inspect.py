@@ -12,8 +12,8 @@ from . import runs as rn
 from . import vampire as vp
 
 # measured on a 1.5M-atom granular write (text snapshots, 2026-11-04): gzip keeps these fractions of the int8 grids;
-# reducing ran at ~45 MB/s of spin files per worker
-GZ_TOP, GZ_VOL, MB_PER_S = 0.53, 0.68, 45.0
+# reducing ran at ~45 MB/s of spin files per worker. grain.txt: GRAIN_MB_PER_S, one process (make_large.py run, 2026-11-05)
+GZ_TOP, GZ_VOL, MB_PER_S, GRAIN_MB_PER_S = 0.53, 0.68, 45.0, 50.0
 
 
 def _lines(path):
@@ -25,20 +25,26 @@ def _lines(path):
     return n
 
 
-def _first_atoms(path, n_max=200000):
-    """xyz (A) of the first atoms of a coordinate data file (pitch estimate)."""
-    if vp._is_binary(path):
-        with open(path, "rb") as f:
-            n = int(np.fromfile(f, np.uint64, 1)[0])
-            f.seek(8 + 8 * n)                          # type and category, int32 each
-            m = min(n, n_max)
-            return np.fromfile(f, np.float64, 3 * m).reshape(-1, 3)
-    rows = []
-    with open(path) as f:
-        f.readline()
-        for _, line in zip(range(n_max), f):
-            rows.append([float(v) for v in line.split()[2:5]])
-    return np.array(rows)
+def _table_rows(path, sample=1 << 20):
+    """Data rows of a text table; of a large one, estimated from the size of its first rows (rows of a VAMPIRE table
+    are nearly the same length, and counting would mean reading tens of GB)."""
+    size = os.path.getsize(path)
+    if size <= 1 << 28:
+        return _lines(path)
+    with open(path, "rb") as f:
+        lines = [l for l in f.readlines(max(sample, 1)) if l.strip() and not l.startswith(b"#")]
+    return int(size / (sum(map(len, lines)) / len(lines))) if lines else 0
+
+
+def _sample_atoms(path, pieces=64, each=4096):
+    """xyz (A) of a sample of a coordinate data file, from all over it (pitch and extent estimate): a file may hold one
+    atomic layer after another."""
+    if not vp._is_binary(path):
+        return next(vp.coord_chunks(path, pieces * each))[1]
+    n = int(np.fromfile(path, np.uint64, 1)[0])
+    rows = [np.fromfile(path, np.float64, 3 * min(each, n - a), offset=8 + 8 * n + 24 * a)
+            for a in sorted({int(k * max(n - each, 0) / max(pieces - 1, 1)) for k in range(pieces)})]
+    return np.concatenate(rows).reshape(-1, 3)
 
 
 def _mb(b):
@@ -79,10 +85,13 @@ def run_report(r, opts):
         else:
             try:
                 vp.grain_columns(d, nG)
-                frames = sum(_lines(os.path.join(x, "grain.txt")) for x in r.dirs)
+                frames = sum(_table_rows(os.path.join(x, "grain.txt")) for x in r.dirs)
                 fr = -(-frames // opts.get("grain_every", 1))
                 gbytes = fr * nG * 4 * (4 if opts.get("grain_precision", 16) == 32 else 2) + fr * 16
+                if gbytes > red.GRAIN_WHOLE_MAX:
+                    gbytes += min(red.OVERVIEW_BINS, fr) * nG * 8
                 size += gbytes
+                sec += sum(os.path.getsize(os.path.join(x, "grain.txt")) for x in r.dirs) / (GRAIN_MB_PER_S * 1e6)
                 say(f"  grain views   yes: {nG} grains x {frames} frames in grain.txt ({_mb(gbytes)} in the bundle)")
             except ValueError as err:
                 say(f"  grain views   no: grain.txt not usable: {err}")
@@ -98,8 +107,8 @@ def run_report(r, opts):
         n_atoms = int(vp._meta_files(meta)[0].get("Number of atoms", "0").split()[0]) if os.path.exists(meta) else 0
         windowed = sum(1 for *_, w in snaps if w)
         spin_bytes = sum(os.path.getsize(f) for _, _, fs, _ in snaps for f in fs if os.path.exists(f))
-        xyz = _first_atoms(cfiles[0])
-        g = red.Grid(*[v for v in (inp.num("dimensions:system-size-x"), inp.num("dimensions:system-size-y"))], xyz,
+        xyz = _sample_atoms(cfiles[0])
+        g = red.Grid(inp.num("dimensions:system-size-x"), inp.num("dimensions:system-size-y"), red.axis_stats(xyz),
                      None, opts.get("top_max", red.TOP_MAX), opts.get("layer_max", red.LAYER_MAX))
         g.nz = max(1, int(round(inp.num("dimensions:system-size-z") * 10 / g.pz)))   # first atoms may miss layers
         bits = opts.get("precision", 8)
@@ -115,6 +124,12 @@ def run_report(r, opts):
         say(f"                grid ~{g.nx} x {g.ny} columns of {g.p * g.tf / 10:.3f} nm, layers ~{g.vx} x {g.vy} x {g.nz}"
             f"; {kept} snapshots kept, ~{_mb(snap_bytes)} in the bundle"
             + ("" if opts.get("snapshots", True) else " (left out: --no-snapshots)"))
+        if opts.get("snapshots", True):
+            per_file = (n_atoms or vp.CHUNK_ATOMS) // max(1, len(cfiles))
+            each = red.worker_memory(g, per_file, opts.get("volume", True), bits)
+            n, why = red.worker_count(kept, each, opts.get("workers"), opts.get("mem"))
+            say(f"  memory        {n} snapshot worker(s) of ~{each / 1e9:.2f} GB ({why}); up to ~1.5 GB for the coordinates; "
+                f"up to ~{13 * (n_atoms or 0) / 1e9:.1f} GB of indices on disk while reducing")
         size += 4 * g.nx * g.ny
     # type-specific
     if r.type == "hamr":
@@ -144,5 +159,5 @@ def inspect(paths, order=None, opts=None):
         lines, size, sec = run_report(r, opts)
         total, secs = total + size, secs + sec
         print("\n".join(lines) + "\n")
-    print(f"estimated bundle ~{_mb(total)}, reduce ~{max(1, round(secs))} s (rough: from a 1.5M-atom run's "
-          f"compression and speed)")
+    print(f"estimated bundle ~{_mb(total)}, reduce ~{max(1, round(secs))} s (rough: measured compression and speed of "
+          f"a 1.5M-atom run and of grain.txt)")
