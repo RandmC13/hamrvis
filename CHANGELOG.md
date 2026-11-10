@@ -19,3 +19,4 @@ Fixed:
 - `dimensions:system-size` and VAMPIRE's default size of 10 nm are now understood, instead of stopping the reduce.
 - A write without `hamr:bit-size` or `hamr:track-size`, or an output table with no rows, now gets a clear message.
 - The local server can no longer be led outside the bundle by a Windows drive path.
+- `export` no longer depends on the system's text encoding, which stopped it on Windows with Python before 3.15.

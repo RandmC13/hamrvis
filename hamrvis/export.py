@@ -56,9 +56,9 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
     files["manifest.json"] = json.dumps(man, separators=(",", ":")).encode()
     emb = {k: _b64gz(v) for k, v in files.items()}
 
-    html = open(os.path.join(VIEWER, "index.html")).read()
-    style = open(os.path.join(VIEWER, "style.css")).read()
-    script = open(os.path.join(VIEWER, "app.js")).read()
+    html = open(os.path.join(VIEWER, "index.html"), encoding="utf-8").read()
+    style = open(os.path.join(VIEWER, "style.css"), encoding="utf-8").read()
+    script = open(os.path.join(VIEWER, "app.js"), encoding="utf-8").read()
     html = html.replace('<link rel="stylesheet" href="style.css">', f"<style>\n{style}</style>")
     html = html.replace('<script src="app.js"></script>',
                         "<script>window.HV_EMBED=" + json.dumps(emb, separators=(",", ":")) + ";</script>\n"
@@ -66,7 +66,7 @@ def export(bundle, out, grain_step=4, snap_step=1, volume=True, limit_mb=15.5, e
     html = re.sub(r"<title>.*?</title>", f"<title>{man['name']} HAMR Run</title>", html)
     if embedded_page:   # the host supplies the document skeleton
         html = re.sub(r"<!doctype html>|</?html[^>]*>|</?head>|</?body>|<meta charset[^>]*>|<meta name=\"viewport\"[^>]*>", "", html)
-    open(out, "w").write(html)
+    open(out, "w", encoding="utf-8").write(html)
     mb = os.path.getsize(out) / 1e6
     biggest = sorted(((len(v), k) for k, v in emb.items()), reverse=True)[:4]
     print(f"{out}: {mb:.1f} MB (largest: " + ", ".join(f"{k} {n / 1e6:.1f} MB" for n, k in biggest) + ")")

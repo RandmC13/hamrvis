@@ -9,7 +9,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.8", "3.x"]
         exclude:
-          - os: macos-latest   # no Python 3.8 for Apple silicon runners
+          - os: macos-latest   # the newest runners offer no Python 3.8; Windows still tests it
+            python: "3.8"
+          - os: ubuntu-latest
             python: "3.8"
     steps:
       - uses: actions/checkout@v4

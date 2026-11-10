@@ -1,0 +1,3 @@
+# test data is compared with VAMPIRE's files byte for byte: never convert its line endings
+tests/scenarios/** -text
+tests/fixture-*/** -text

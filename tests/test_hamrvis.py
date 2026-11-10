@@ -268,14 +268,14 @@ class Reduce(unittest.TestCase):
     def test_export(self):
         out = os.path.join(self.tmp, "page.html")
         export.export(self.bundle, out, grain_step=2)
-        html = open(out).read()
+        html = open(out, encoding="utf-8").read()
         self.assertIn("window.HV_EMBED=", html)
         self.assertNotIn('src="app.js"', html)
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_viewer_model_matches_python(self):
         # the viewer's JavaScript port of the head / field / temperature model must agree with vampire.py
-        src = open(APP).read()
+        src = open(APP, encoding="utf-8").read()
         model = src[src.index("function Model(p)"):src.index("// ---", src.index("function Model(p)"))]
         for run in (RUN, LEADIN):
             h = vp.Hamr(run)
@@ -380,7 +380,7 @@ class Bundles(unittest.TestCase):
     def test_export_takes_every_run(self):
         out = os.path.join(self.tmp, "rewrite.html")
         export.export(os.path.join(self.tmp, "rewrite"), out)
-        html = open(out).read()
+        html = open(out, encoding="utf-8").read()
         for rid in ("1-write", "2-read", "3-rewrite", "4-read"):
             self.assertIn(f'"{rid}/output.f64"', html)
 
@@ -449,7 +449,7 @@ class Bundles(unittest.TestCase):
 
     def test_version_is_the_same_everywhere(self):
         import hamrvis
-        self.assertIn(f'HAMRVIS_VERSION = "{hamrvis.__version__}"', open(APP).read())
+        self.assertIn(f'HAMRVIS_VERSION = "{hamrvis.__version__}"', open(APP, encoding="utf-8").read())
         self.assertIn(f"version: {hamrvis.__version__}", open(os.path.join(HERE, "..", "CITATION.cff")).read())
         with tempfile.TemporaryDirectory() as tmp:
             reduce.reduce([os.path.join(SCEN, "write-only")], tmp + "/b", workers=1)
@@ -457,7 +457,7 @@ class Bundles(unittest.TestCase):
 
     def test_viewer_reads_version_1_manifests(self):
         # bundles reduced before the run list keep their three tabs, titles and links (#relax, #write, #read)
-        src = open(APP).read()
+        src = open(APP, encoding="utf-8").read()
         fn = src[src.index("function normalise(M)"):src.index("\n}\n", src.index("function normalise(M)")) + 3]
         v1 = {"version": 1, "stages": {
             "read": {"input": {"sim:integrator": "llg-heun"}, "dipole": {}},
@@ -648,7 +648,7 @@ class ReduceOptions(unittest.TestCase):
         self.assertEqual(e["grain_series"]["dtype"], "f32")
         self.assertTrue(os.path.exists(os.path.join(out, "write", "grains.f32")))
         export.export(out, os.path.join(self.tmp, "p32.html"))
-        html = open(os.path.join(self.tmp, "p32.html")).read()
+        html = open(os.path.join(self.tmp, "p32.html"), encoding="utf-8").read()
         self.assertIn('"write/grains.f32"', html)
         self.assertIn('"write/top/00000000.f32.gz"', html)
 
@@ -692,7 +692,7 @@ class ReduceOptions(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_viewer_decodes_every_precision(self):
-        src = open(APP).read()
+        src = open(APP, encoding="utf-8").read()
         code = src[src.index("const SNAP = "):src.index("// one snapshot array")]
         js = code + """const raw = { i8: [0, 127, -127, -128], i16: [0, 32767, -32767, -32768], f32: [0, 0.25, -1, NaN] };
             const out = Object.entries(SNAP).map(([k, [T, sc, E]]) => { const a = new T(raw[k]); a.S = sc; a.E = E;
@@ -777,7 +777,7 @@ class Scale(unittest.TestCase):
         html = os.path.join(self.tmp, "long.html")
         with contextlib.redirect_stdout(io.StringIO()):
             export.export(out, html, grain_step=20, volume=False, limit_mb=1000)
-        self.assertNotIn('"overview"', re.search(r'manifest.json":"([^"]*)"', open(html).read()).group(0))
+        self.assertNotIn('"overview"', re.search(r'manifest.json":"([^"]*)"', open(html, encoding="utf-8").read()).group(0))
 
     def test_snapshots_hold_the_known_answer(self):
         out, e = self.bundle("snaps")
