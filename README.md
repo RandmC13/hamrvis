@@ -127,7 +127,8 @@ hamrvis separates what VAMPIRE recorded from what it works out itself:
 
 - Magnetisation and grain values come from VAMPIRE's files, rounded to the stated precision. Each reduce checks the
   stored values against the exact means and against `grain.txt`, and shows the result under Run details.
-- The head position, laser temperature and field are rebuilt from your input using VAMPIRE's formulas.
+- The head position, laser temperature and field are rebuilt from your input using VAMPIRE's formulas, and checked
+  against VAMPIRE's `B_applied` column and logged head positions when you reduce.
 - The write analysis is hamrvis's own interpretation, including the freezing temperature, the freeze lag and which
   grains count as written correctly. [docs/analysis.md](docs/analysis.md) gives the definitions.
 

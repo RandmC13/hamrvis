@@ -545,8 +545,10 @@ class Hamr:
         # the end of the lead-in (ne) but stopped at bits_per_track * nb, so a lead-in of a bit or more lost bits at the
         # end of every track (the field stays off over their cells); that model is used when the log has no whole track
         self.written = _bits_written_per_track(segments or [run_dir])
+        self.written_source = "log"
         if self.written is None:
             self.written = max(0, min(self.bits_per_track, -(-(self.bits_per_track * self.nb - self.ne) // self.nb)))
+            self.written_source = "formula"
         w, bpt = self.written, self.bits_per_track
         # sequence per bit cell (track * bits_per_track + bit); VAMPIRE takes bit t * written + b of its sequence
         self.sequence = [self.sequence[t * w + b] if b < w else 0 for t in range(self.n_tracks) for b in range(bpt)]
@@ -554,7 +556,7 @@ class Hamr:
     def params(self):
         """Everything the viewer needs to rebuild the head, as plain numbers."""
         keys = ("dt", "eq", "Tmin", "Tmax", "Hmin", "Hmax", "Hpeak", "field_uz", "rise", "fall", "Lx", "Ly", "Lz", "v", "BL", "TW", "pad", "NPS", "fwhm_x",
-                "fwhm_y", "box_x", "box_y", "sigma_x", "sigma_y", "step_nm", "nb", "ne", "bits_per_track", "written", "nt",
+                "fwhm_y", "box_x", "box_y", "sigma_x", "sigma_y", "step_nm", "nb", "ne", "bits_per_track", "written", "written_source", "nt",
                 "n_tracks", "laser_steps")
         p = {k: getattr(self, k) for k in keys}
         p["sequence"] = self.sequence
@@ -599,6 +601,47 @@ class Hamr:
 
     def track_of(self, y):
         return np.clip(np.floor((np.asarray(y) - self.pad) / self.TW), 0, self.n_tracks - 1).astype(int)
+
+    def check(self, segments, cols, out):
+        """The model against what VAMPIRE recorded for this run: B_applied of the output table (every row whose
+        printed time resolves a single step) and the head positions logged after each bit ("Written bit N" then
+        "Head moving to position: x nm, y nm"; in a continued job only those after "continued from checkpoint", as
+        the replayed loop logs a stale head). VAMPIRE prints 6 significant digits, hence rtol 1e-5."""
+        res = {}
+        if "B_applied" in cols and "Real_time" in cols and len(out):
+            t, B = out[:, cols.index("Real_time")], out[:, cols.index("B_applied")]
+            ok = 10.0 ** (np.floor(np.log10(np.maximum(np.abs(t), 1e-300))) - 5) <= self.dt / 2
+            steps = np.rint(t[ok] / self.dt).astype(np.int64)
+            diff = np.abs(self.field(steps) - B[ok])
+            res["B_applied"] = dict(rows=int(ok.sum()), left_out=int((~ok).sum()), max_diff=float(diff.max()) if ok.any() else 0.0,
+                                    bad=int((~np.isclose(self.field(steps), B[ok], rtol=1e-5, atol=1e-9)).sum()))
+        seen = {}
+        for d in segments:
+            try:
+                with open(os.path.join(d, "log"), errors="replace") as f:
+                    lines = f.read().splitlines()
+            except OSError:
+                continue
+            start = max((i for i, l in enumerate(lines) if "continued from checkpoint" in l), default=-1) + 1
+            n = None
+            for line in lines[start:]:
+                m = re.search(r"Written bit (\d+)", line)
+                if m:
+                    n = int(m.group(1)) - 1
+                    continue
+                m = re.search(r"Head moving to position: (\S+) nm, (\S+) nm", line)
+                if m and n is not None:
+                    seen[n] = (float(m.group(1)), float(m.group(2)))
+                n = None
+        if seen and self.written:
+            n = np.array(sorted(seen))
+            j = self.ne + (n % self.written + 1) * self.nb + 1                 # step in the track after bit n
+            x, y = -self.BL / 2 - self.NPS + (j + 1) * self.step_nm, self.track_y(n // self.written)
+            lx, ly = np.array([seen[k] for k in n]).T
+            bad = ~(np.isclose(x, lx, rtol=1e-5, atol=1e-6) & np.isclose(y, ly, rtol=1e-5, atol=1e-6))
+            res["positions"] = dict(lines=len(n), max_dx_nm=float(np.abs(x - lx).max()), max_dy_nm=float(np.abs(y - ly).max()),
+                                    bad=int(bad.sum()))
+        return res
 
     def freeze_lag(self, Tc):
         """Distance (nm) behind the laser centre where the track centre line cools through Tc."""

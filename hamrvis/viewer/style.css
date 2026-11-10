@@ -212,3 +212,10 @@ td.num { text-align: right; }
   .chain button { min-width: 0; }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+.warn { margin: 0 0 12px; padding: 6px 10px; border: 1px solid var(--bad); border-radius: 4px; color: var(--bad); font-size: 13px; max-width: 90ch; }
+.lagctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 8px; font-size: 13px; }
+.lagctl input[type=number] { width: 6em; } .lagctl input[type=text] { width: 16em; }
+.lagctl .lagnow { color: var(--muted); }
+.how { margin: 0 0 14px; font-size: 13px; color: var(--muted); max-width: 100ch; }
+sup.src { font-size: 9px; font-weight: 700; color: var(--muted); margin-left: 2px; cursor: help; }
+.figkey i.line.solid { border-top-style: solid; }

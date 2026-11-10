@@ -33,7 +33,7 @@ use. See *What the run needs to write* below.
 | Command | What it does |
 |---|---|
 | `python3 -m hamrvis inspect <runs...>` | Lists the runs found in tab order and, per run, its type, file names, what each view needs and whether it is there (with the input keyword that would add it), and the estimated bundle size and reduce time. Reads only small files: run it first, and include its output when reporting a problem. Takes the same options as `reduce`. |
-| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories; each run becomes a tab (see *Runs and tabs*). Options: `--order DIR ...` (tab order by folder name), `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; measured by default), `--name`, `-j N` (parallel workers); see *Reduce options* for the rest. |
+| `python3 -m hamrvis reduce <runs...> -o <bundle>` | `<runs>`: run directories, or a folder whose subfolders are run directories; each run becomes a tab (see *Runs and tabs*). Options: `--order DIR ...` (tab order by folder name), `--no-volume` (skip per-layer data, ~10x smaller), `--every N` (keep every N-th snapshot), `--tc K` (freezing temperature for the analysis; inferred from the data by default), `--name`, `-j N` (parallel workers); see *Reduce options* for the rest. |
 | `python3 -m hamrvis view <bundle>` | Serves the viewer and the bundle on `127.0.0.1:8737` (`-p` to change; a port in use is reported). |
 | `python3 -m hamrvis export <bundle> -o page.html` | One self-contained page. `--grain-step N` keeps every N-th grain frame, `--snap-step N` every N-th snapshot, `--no-volume`, `--artifact` (no document skeleton, for hosts that supply their own). |
 | `python3 -m unittest discover tests` | Tests (needs node for the viewer-model test). |
@@ -169,7 +169,10 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
   grain; tick: decision moment. Click to select the grain and jump to that time. With more frames or grains than
   fit an image, each pixel holds the extreme value of its frames and grains furthest from the pixel before it, so a
   short event stays visible (the same on the time line under the film).
-- **Analysis** (write): success, freezing temperature and lag, where each grain froze, outcomes by circumstance.
+- **Analysis** (write): melted grains matching their intended bit, the inferred freezing temperature and lag, a lag
+  control (inferred, none, custom or from bit centre positions; viewer only, the bundle is unchanged) with the score
+  against the lag, where each grain froze, outcomes by circumstance. Readouts are marked `r` recorded by VAMPIRE,
+  `c` reconstructed from the input, `i` interpreted by hamrvis (docs/analysis.md).
 - **Save PNG** stacks the lanes into one image (local viewer only).
 
 Colours: magnetisation is blue (down) to red (up); fields are green (down) to purple (up), so a field never reads

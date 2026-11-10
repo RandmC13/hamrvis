@@ -12,6 +12,11 @@ First packaged version.
   when run again. The viewer handles films and series too large to load at once.
 - Reads the window snapshots of `hamr:active-window` runs.
 - `pip install` with a `hamrvis` command; the version is stored in each bundle and shown under Run details.
+- What is recorded, reconstructed and interpreted is marked on every readout. The freeze lag can be changed in the
+  viewer (inferred, none, custom, from bit centres), every lag-dependent view follows it and states it, and a chart
+  shows the score against the lag. Each write's head model is checked against VAMPIRE's `B_applied` and logged head
+  positions when it is reduced. Bits reported and bits written are shown with the source of the count; fallbacks are
+  notes on the run; bundles reduced before the current analysis model open with a warning.
 
 Fixed:
 

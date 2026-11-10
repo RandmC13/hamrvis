@@ -334,6 +334,46 @@ class Bundles(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp)
 
+    def test_head_checked_against_vampire_at_reduce_time(self):
+        n = 0
+        for man in self.man.values():
+            for e in (e for e in man["runs"] if e["type"] == "hamr"):
+                hc = e["head_check"]
+                self.assertEqual((hc["B_applied"]["bad"], hc["positions"]["bad"]), (0, 0), e["source"])
+                self.assertGreater(hc["positions"]["lines"], 0)
+                self.assertEqual(e["hamr"]["written_source"], "log")
+                n += 1
+        self.assertGreaterEqual(n, 5)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_viewer_scores_grains_as_the_reducer(self):
+        # the viewer rescores the write at the lag in use; at the bundle's own lag it must give the reducer's numbers
+        manifests = list(self.man.values())
+        for name in ("h3", "2x11"):   # real-run bundles in bundles/ (git-ignored), when present
+            mp = os.path.join(HERE, "..", "bundles", name, "manifest.json")
+            if os.path.exists(mp):
+                manifests.append(json.load(open(mp, encoding="utf-8")))
+        n = 0
+        for man in manifests:
+            for e in man.get("runs") or man["stages"].values():
+                if e.get("analysis"):
+                    self.assertEqual(viewer_scores(e, e["freeze_lag_nm"]), [[a["bit"], a["intended"], a["correct"]] for a in e["analysis"]["grains"]])
+                    n += 1
+        self.assertGreaterEqual(n, 5)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_viewer_rescores_at_another_lag(self):
+        # at another lag the viewer's scoring must equal write_analysis run again with that lag (here via --tc)
+        h = vp.Hamr(os.path.join(SCEN, "write-only", "write"))
+        e = next(e for e in self.man["write-only"]["runs"] if e["type"] == "hamr")
+        Tc = h.Tmin + (h.Tmax - h.Tmin) * 0.9
+        out = os.path.join(self.tmp, "tc")
+        reduce.reduce([os.path.join(SCEN, "write-only")], out, workers=1, Tc=Tc, opts=dict(snapshots=False))
+        f = next(f for f in json.load(open(os.path.join(out, "manifest.json")))["runs"] if f["type"] == "hamr")
+        self.assertNotEqual(f["freeze_lag_nm"], e["freeze_lag_nm"])
+        self.assertEqual(f["Tc_kind"], "given")
+        self.assertEqual(viewer_scores(e, f["freeze_lag_nm"]), [[a["bit"], a["intended"], a["correct"]] for a in f["analysis"]["grains"]])
+
     def test_joined_jobs_equal_one_job(self):
         # the same write run uninterrupted and as two jobs (the first killed mid-write, the second continued from
         # its checkpoint, overlapping it) gives the same bundle, byte for byte
@@ -470,6 +510,16 @@ class Bundles(unittest.TestCase):
                                ["read", "Read-back", "dipole-read", "write", False]])
 
 
+def viewer_scores(e, lag):
+    """[bit, intended, correct] per grain from the viewer's own scoring code (app.js scoreGrains, run in node)."""
+    src = open(APP, encoding="utf-8").read()
+    a = src.index("function scoreGrains(e, lag)")
+    js = src[a:src.index("// ---", a)] + f"""
+        const e = {json.dumps(dict(hamr=e["hamr"], grains=dict(x=e["grains"]["x"]), analysis=e["analysis"]))};
+        console.log(JSON.stringify(scoreGrains(e, {json.dumps(lag)}).map(a => [a.bit, a.intended, a.correct])));"""
+    return json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+
+
 def copy_run(src, d, edit=None):
     """Copy run directory src to d (files only); edit(input text) -> new input text."""
     shutil.copytree(src, d)
@@ -568,6 +618,7 @@ class Parsing(unittest.TestCase):
         e = json.load(open(os.path.join(self.tmp, "b", "manifest.json")))["runs"][0]
         self.assertIn("snapshots", e)
         self.assertEqual(len(e["grains"]["magnetic_atoms"]), 9)
+        self.assertIn("every material counted as magnetic", " ".join(e["notes"]))   # said on the page, not only in the log
 
     def test_continuous_film_has_atom_views_only(self):
         reduce.reduce([os.path.join(SCEN, "continuous")], os.path.join(self.tmp, "b"), workers=1)
@@ -700,6 +751,23 @@ class ReduceOptions(unittest.TestCase):
             console.log(JSON.stringify(out.map(r => r.map(v => v !== v ? null : v))));"""
         res = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(res, [[0, 1, -1, None], [0, 1, -1, None], [0, 0.25, -1, None]])
+
+
+class HeadCheck(unittest.TestCase):
+    def test_a_wrong_model_is_caught(self):
+        run = os.path.join(SCEN, "write-only", "write")
+        cols, out = vp.read_output(run)
+        h = vp.Hamr(run)
+        self.assertEqual({k: v["bad"] for k, v in h.check([run], cols, out).items()}, {"B_applied": 0, "positions": 0})
+        h.Hpeak *= 1.001
+        h.step_nm *= 1.001
+        bad = h.check([run], cols, out)
+        self.assertGreater(bad["B_applied"]["bad"], 0)
+        self.assertGreater(bad["positions"]["bad"], 0)
+
+    def test_nothing_to_check_against(self):
+        h = vp.Hamr(os.path.join(SCEN, "write-only", "write"))
+        self.assertEqual(h.check([], ["Real_time"], np.zeros((0, 1))), {})
 
 
 class NewScenarios(unittest.TestCase):

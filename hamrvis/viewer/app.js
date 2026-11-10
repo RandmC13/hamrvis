@@ -2,6 +2,8 @@
 // Data comes from bundle/<path> over HTTP (`hamrvis view`) or from window.HV_EMBED (`hamrvis export`).
 "use strict";
 const HAMRVIS_VERSION = "0.9.0"; // same as hamrvis/__init__.py (a test checks)
+const ANALYSIS_MODEL = "0.9.0";   // first hamrvis version whose write analysis matches the current one (docs/analysis.md)
+const older = v => !v || v.split(".").map(Number).reduce((c, x, i) => c || x - (+ANALYSIS_MODEL.split(".")[i] || 0), 0) < 0;
 
 // ------------------------------------------------------------------------------------------------ bundle access
 const EMB = window.HV_EMBED || null;
@@ -33,12 +35,17 @@ async function tryBuf(path) { try { return await getBuf(path); } catch (e) { ret
 // ------------------------------------------------------------------------------------------------ state
 const S = { M: null, stage: null, f: 0, fa: 0, view: "grains", colour: "mz", layer: 0, sel: -1, hov: -1, ysec: 0,
             z: 0, rw: 10, playing: false, storyAll: false, stAll: false, cells: false, pol: false, hx: null,
-            win: { x0: 0, x1: 1 }, dspan: 1, y0: 0, follow: true };
+            win: { x0: 0, x1: 1 }, dspan: 1, y0: 0, follow: true,
+            lag: { mode: "inferred", custom: 0, centres: "" } };   // freeze lag used to score the write (viewer state only)
 const D = {};                                                    // per-stage data, filled by loadStage
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const fmt = (v, d = 1) => (v == null || !isFinite(v)) ? "–" : v.toFixed(d);
 const sgn = v => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v);
+// where a readout comes from: recorded by VAMPIRE, reconstructed from the run's input, or interpreted by hamrvis
+const MARK = { r: "recorded by VAMPIRE", c: "reconstructed by hamrvis from the run's input (head model)", i: "interpreted by hamrvis (write analysis)" };
+const mk = (k, t) => `${k}<sup class="src" title="${MARK[t]}">${t}</sup>`;
+const markKey = `<span class="src-key"><sup class="src">r</sup> recorded by VAMPIRE · <sup class="src">c</sup> reconstructed from the input · <sup class="src">i</sup> interpreted by hamrvis</span>`;
 const kv = rows => `<dl class="facts">${rows.filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
 
 // ------------------------------------------------------------------------------------------------ HAMR model
@@ -81,6 +88,21 @@ function Model(p) {
   const passStep = (x, track) => p.eq + track * p.nt + Math.round((x + p.BL / 2 + p.NPS) / p.step_nm) - 1;
   return { p, head, field, T, inBox, bit, peakT, passStep };
 }
+
+// ------------------------------------------------------------------------------------------------ write scoring
+// Port of reduce.write_analysis's grain-to-bit assignment: grain g lies in bit floor((x + lag) / BL) of its track and
+// is intended to point along that bit's field. Category, decision and final state do not depend on the lag.
+function scoreGrains(e, lag) {
+  const p = e.hamr, seq = p.sequence, n = p.bits_per_track;
+  return e.analysis.grains.map((a, g) => {
+    const b = Math.floor((e.grains.x[g] + lag) / p.BL), k = a.track * n + b;
+    const intended = Math.sign((b >= 0 && b < n && k < seq.length ? seq[k] : 0) * p.field_uz) || 0;
+    return { ...a, bit: b, intended, correct: a.category !== "unheated" && a.category !== "undecided" && intended !== 0 && Math.sign(a.final) === intended };
+  });
+}
+// melted grains matching their intended bit (ok of n) and melted grains outside every bit cell (left out)
+const scoreOf = an => { const m = an.filter(a => a.category !== "unheated"), w = m.filter(a => a.intended);
+  return { ok: w.filter(a => a.correct).length, n: w.length, out: m.length - w.length }; };
 
 // ------------------------------------------------------------------------------------------------ colour maps
 const hex = c => c.startsWith("rgb") ? c.match(/\d+/g).map(Number) : [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
@@ -152,7 +174,8 @@ async function loadStage(st) {
   }
   if (e.dipole) d.B = new Float32Array(await getBuf(`${st}/dipole.f32`));
   if (e.hamr) d.model = Model(e.hamr);
-  d.an = e.analysis ? e.analysis.grains : null;
+  d.an0 = e.analysis && e.hamr ? e.analysis.grains : null;            // as reduced; d.an is rescored at the lag in use
+  d.an = d.an0 ? scoreGrains(e, lagOf(e).lag) : e.analysis ? e.analysis.grains : null;
   return (D[st] = d);
 }
 // snapshot grid encodings (reduce --precision): array type, scale, empty-pixel marker
@@ -230,6 +253,24 @@ const wantOf = (d, g) => {                                        // intended z 
   const an = d.an || (refD(d) && refD(d).an);                     // 0 for grains the laser never melts
   return an && an[g] && an[g].category !== "unheated" ? an[g].intended : 0;
 };
+// the lag in use for a write run W (entry) and where it comes from
+function lagOf(W) {
+  const L = S.lag, given = W.Tc_kind === "given" || W.Tc_source === "given on the command line";
+  if (L.mode === "none") return { lag: 0, src: "none" };
+  if (L.mode === "custom") return { lag: L.custom, src: "custom" };
+  if (L.mode === "centres") {   // bit b's cell is centred at (b + 0.5) BL - lag: the mean over the centres given
+    const c = L.centres.split(/[\s,;]+/).filter(Boolean).map(Number).filter(isFinite);
+    if (c.length) return { lag: c.reduce((s, x, b) => s + (b + .5) * W.hamr.BL - x, 0) / c.length, src: `from ${c.length} bit centre${c.length > 1 ? "s" : ""}` };
+  }
+  return { lag: W.freeze_lag_nm || 0, src: given ? "from --tc" : "inferred" };
+}
+const lagText = W => { const l = lagOf(W); return `lag ${fmt(l.lag, 2)} nm (${l.src})`; };
+const writeOf = d => d.e.hamr ? d.e : d.e.ref ? S.M.byId[d.e.ref] : null;
+function applyLag() {   // rescore every loaded write and drop what was built from the old lag
+  for (const d of Object.values(D)) if (d.an0) { d.an = scoreGrains(d.e, lagOf(d.e).lag); delete d.bitIdx; }
+  for (const k in _cells) delete _cells[k];
+  syncControls(); drawAnalysis(); drawDetails(); redraw();
+}
 function grainAt(x, y) {                                          // grain index at film position, from the atom map
   const d = cur(), M = d.e.grain_map;
   if (!M) return d.e.grains.outline ? d.e.grains.outline.findIndex(o => o && inPoly(o, x, y)) : -1;
@@ -456,7 +497,7 @@ function drawFilm(ctx, w, h) {
 // bit cells: each bit's region (shifted upstream by the freeze lag) on every track; the band hotter than Tc
 function cellGeom(d = cur()) {
   const W = d.e.hamr ? d.e : d.e.ref && S.M.byId[d.e.ref]; if (!W || !W.hamr) return null;
-  const p = W.hamr, lag = W.freeze_lag_nm || 0, Tc = W.Tc;
+  const p = W.hamr, lag = lagOf(W).lag, Tc = W.Tc;
   const half = Tc > p.Tmin && Tc < p.Tmax ? p.sigma_y * Math.sqrt(2 * Math.log((p.Tmax - p.Tmin) / (Tc - p.Tmin))) : 0;
   return { p, lag, Tc, half };
 }
@@ -511,7 +552,7 @@ function drawCells(ctx, sx, sy, h) {
       }
     }
   }
-  return `bit cells shifted ${fmt(lag)} nm upstream; solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm` +
+  return `bit cells shifted ${fmt(lag)} nm upstream (${lagOf(writeOf(cur())).src}); solid: ${fmt(Tc, 0)} K band, ±${fmt(half)} nm` +
     (S.pol ? "; outline: sign of the cell's mean m_z inside the band (grey: |m_z| < 0.05)" : "");
 }
 // laser isotherms drawn on the film and keyed in the legend: freezing T solid, then dashed, dash-dot, dotted with falling T
@@ -589,20 +630,20 @@ function filmTip(x, y) {
     const s = nearestSnap(d, d.steps[S.f]), a = s && snapArray(d, "top", s.index);
     if (a && ix >= 0 && ix < G.nx && iy >= 0 && iy < G.ny) {
       const v = snapVal(a, 2 * G.nx * G.ny + iy * G.nx + ix);
-      rows.push(["column m<sub>z</sub>", v !== v ? "–" : fmt(v, 2)], ["atoms in column", d.topCount[iy * G.nx + ix]],
-                ["lowest column |m|", fmt(d.minm[iy * G.nx + ix] / 255, 2)]);
+      rows.push([mk("column m<sub>z</sub>", "r"), v !== v ? "–" : fmt(v, 2)], [mk("atoms in column", "r"), d.topCount[iy * G.nx + ix]],
+                [mk("lowest column |m|", "r"), fmt(d.minm[iy * G.nx + ix] / 255, 2)]);
     }
   }
-  if (d.model) rows.push(["laser T now", `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], ["peak laser T", `${fmt(d.model.peakT(x, y), 0)} K`]);
+  if (d.model) rows.push([mk("laser T now", "c"), `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], [mk("peak laser T", "c"), `${fmt(d.model.peakT(x, y), 0)} K`]);
   if (S.cells && S.pol && d.g && cellGeom(d)) {
     const C = cellGeom(d), p = C.p, t = Math.min(p.n_tracks - 1, Math.max(0, Math.floor((y - p.pad) / p.TW))), b = Math.floor((x + C.lag) / p.BL);
     const c = b >= 0 && b < p.bits_per_track ? cellParts(d)[t * p.bits_per_track + b] : null;
-    if (c) rows.push([`bit ${b + 1} mean m<sub>z</sub>`, `${fmt(cellMz(d, c, S.f), 3)} ${c.want ? (bitOk(d, c, S.f) ? "✓" : "✗") : ""}`]);
+    if (c) rows.push([mk(`bit ${b + 1} mean m<sub>z</sub>`, "i"), `${fmt(cellMz(d, c, S.f), 3)} ${c.want ? (bitOk(d, c, S.f) ? "✓" : "✗") : ""}`]);
   }
   if (g >= 0) {
     rows.push(["grain", e.grains.id[g]]);
-    if (d.g) rows.push(["m<sub>z</sub>", fmt(gmz(d, S.f, g), 3)], ["|m|", fmt(gml(d, S.f, g), 3)]);
-    if (d.an) rows.push(["outcome", outcome(d.an[g])]);
+    if (d.g) rows.push([mk("m<sub>z</sub>", "r"), fmt(gmz(d, S.f, g), 3)], [mk("|m|", "r"), fmt(gml(d, S.f, g), 3)]);
+    if (d.an) rows.push([mk("outcome", "i"), outcome(d.an[g])]);
   }
   return kv(rows);
 }
@@ -661,7 +702,7 @@ function bitsLane() {
     id: "bits", group: "top", title: "Bits", yMode: "px",
     height: () => row(cur().model.p) * shown(cur().model.p),
     draw(ctx, w, h) {
-      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, bt = d.model.bit(d.steps[S.f]), f = S.f;
+      const d = cur(), p = d.model.p, lag = lagOf(d.e).lag, bt = d.model.bit(d.steps[S.f]), f = S.f;
       ctx.clearRect(0, 0, w, h);
       ctx.font = `600 11.5px ${css("--font")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       const t0 = firstTrack(d, p);
@@ -690,15 +731,15 @@ function bitsLane() {
           ctx.fillStyle = css(bt && bt[0] === t ? "--ink" : "--muted"); ctx.fillText(bt && bt[0] === t ? `${label} · writing` : label, 4, y0 - 6); ctx.restore();
         }
       }
-      setNote("bits", [p.n_tracks > MAX_ROWS ? `tracks ${t0 + 1}–${t0 + shown(p)} of ${p.n_tracks}` : "", p.n_tracks > 1 ? `${p.n_tracks} tracks, as on the film; box: bit under the head` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`, "grey: not yet written"]);
+      setNote("bits", [p.n_tracks > MAX_ROWS ? `tracks ${t0 + 1}–${t0 + shown(p)} of ${p.n_tracks}` : "", p.n_tracks > 1 ? `${p.n_tracks} tracks, as on the film; box: bit under the head` : "", `✓ / melted grains at ${timeText(d, d.time[S.f])}`, lagText(d.e), "grey: not yet written"]);
     },
     hover(x, py) {
-      const d = cur(), p = d.model.p, lag = d.e.freeze_lag_nm, t = rowTrack(d, p, py), b = Math.floor((x + lag) / p.BL);
+      const d = cur(), p = d.model.p, lag = lagOf(d.e).lag, t = rowTrack(d, p, py), b = Math.floor((x + lag) / p.BL);
       if (b < 0 || b >= p.bits_per_track) return "";
       const want = Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), gs = bitGrains(d, t, b);
-      return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], ["intended", want > 0 ? "up (+z)" : want < 0 ? "down (−z)" : "no field"],
-        ["x", `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], !written(d, S.f, gs) && ["written", "not yet"], [`✓ at ${timeText(d, d.time[S.f])}`, `${gs.filter(g => okAt(d, S.f, d.an[g], g)).length} / ${gs.length}`],
-        ["✓ at end", `${gs.filter(g => d.an[g].correct).length} / ${gs.length}`]]);
+      return kv([["bit", `${b + 1} / ${p.bits_per_track}`], p.n_tracks > 1 && ["track", t + 1], [mk("intended", "i"), want > 0 ? "up (+z)" : want < 0 ? "down (−z)" : "no field"],
+        [mk("x", "i"), `${fmt(b * p.BL - lag)}–${fmt((b + 1) * p.BL - lag)} nm`], !written(d, S.f, gs) && ["written", "not yet"], [mk(`✓ at ${timeText(d, d.time[S.f])}`, "i"), `${gs.filter(g => okAt(d, S.f, d.an[g], g)).length} / ${gs.length}`],
+        [mk("✓ at end", "i"), `${gs.filter(g => d.an[g].correct).length} / ${gs.length}`], ["", lagText(d.e)]]);
     },
   };
 }
@@ -770,7 +811,7 @@ function waveLane() {
       ctx.strokeStyle = css("--rule"); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(w, y(0)); ctx.stroke();
       const wr = cellGeom(d) && (d.e.hamr ? d.e : S.M.byId[d.e.ref]);
       if (wr) {
-        const p = wr.hamr, lag = wr.freeze_lag_nm, t = trackOfSection(p);
+        const p = wr.hamr, lag = lagOf(wr).lag, t = trackOfSection(p);
         ctx.strokeStyle = css("--muted"); ctx.setLineDash([2, 3]);
         for (let b = 1; b < p.bits_per_track; b++) if (p.sequence[t * p.bits_per_track + b] !== p.sequence[t * p.bits_per_track + b - 1]) {
           const xx = X(b * p.BL - lag, w); ctx.beginPath(); ctx.moveTo(xx, 4); ctx.lineTo(xx, h - 4); ctx.stroke();
@@ -1060,14 +1101,14 @@ function drawInspector() {
     : !a.intended ? `<span class="chip none">outside bits</span>` : a.correct ? `<span class="chip ok">✓ intended</span>` : `<span class="chip bad">✗ wrong</span>`;
   const rows = [["x, y", `${fmt(e.grains.x[g])}, ${fmt(e.grains.y[g])} nm`],
     ["magnetic atoms", (e.grains.magnetic_atoms || e.grains.atoms)[g].toLocaleString()]];
-  if (d.g) rows.push(["m<sub>z</sub>", fmt(gmz(d, S.f, g), 3)], ["|m|", fmt(gml(d, S.f, g), 3)]);
+  if (d.g) rows.push([mk("m<sub>z</sub>", "r"), fmt(gmz(d, S.f, g), 3)], [mk("|m|", "r"), fmt(gml(d, S.f, g), 3)]);
   if (a) {
-    if (a.intended) rows.push(["intended", a.intended > 0 ? "↑ +z" : "↓ −z"]);
-    rows.push(["final m<sub>z</sub>", fmt(a.final, 3)]);
-    if (a.decision_step != null) rows.push(["decided", timeText(d, a.decision_step * e.dt)], ["T then", `${fmt(a.T_dec, 0)} K`],
-      ["B<sub>z</sub> then", `${sgn(+(a.B_dec * e.hamr.field_uz).toFixed(2))} T (${CAT[a.category]})`],
-      ["behind laser", `${fmt(a.lag_dec)} nm`], ["off track centre", `${fmt(a.dy)} nm`]);
-    rows.push(["peak T", `${fmt(a.peakT, 0)} K`], ["lowest |m|", fmt(a.minM, 3)]);
+    if (a.intended) rows.push([mk("intended", "i"), `${a.intended > 0 ? "↑ +z" : "↓ −z"} (bit ${a.bit + 1}, ${lagText(e)})`]);
+    rows.push([mk("final m<sub>z</sub>", "r"), fmt(a.final, 3)]);
+    if (a.decision_step != null) rows.push([mk("decided", "i"), timeText(d, a.decision_step * e.dt)], [mk("T then", "c"), `${fmt(a.T_dec, 0)} K`],
+      [mk("B<sub>z</sub> then", "c"), `${sgn(+(a.B_dec * e.hamr.field_uz).toFixed(2))} T (${CAT[a.category]})`],
+      [mk("behind laser", "c"), `${fmt(a.lag_dec)} nm`], [mk("off track centre", "c"), `${fmt(a.dy)} nm`]);
+    rows.push([mk("peak T", "c"), `${fmt(a.peakT, 0)} K`], [mk("lowest |m|", "r"), fmt(a.minM, 3)]);
   }
   el.innerHTML = `<h2>Grain ${e.grains.id[g]} ${chip}</h2>` + kv(rows) +
     (d.g && d.nF > 1 ? `<svg id="story" role="img" aria-label="Grain history"></svg>` + (d.model ? `<label class="toggle"><input type="checkbox" id="story-all" ${S.storyAll ? "checked" : ""}> whole run</label>` : "") : "");
@@ -1075,18 +1116,28 @@ function drawInspector() {
   const cb = $("story-all"); if (cb) cb.onchange = () => { S.storyAll = cb.checked; redraw(); };
 }
 const stageTitle = st => S.M.byId[st].title;
+const tcKind = e => e.Tc_kind === "given" || e.Tc_source === "given on the command line" ? "given with --tc" : "inferred";
+// bits VAMPIRE reports ("Bits to be written") and the ones its loop wrote, with where the written count comes from
+function bitsText(p, short) {
+  const rep = p.bits_per_track * p.n_tracks, w = (p.written ?? p.bits_per_track) * p.n_tracks;
+  if (short) return !p.written_source ? `${rep} reported` : w === rep ? `${rep}` : `${w} of ${rep} reported`;
+  if (!p.written_source) return `${rep} reported (bits written not recorded by this bundle's hamrvis)`;
+  const src = p.written_source === "log" ? "counted in the log" : "from VAMPIRE's bit loop, the log has no whole track";
+  return w === rep && p.written_source === "log" ? `${rep} (${src})` : `${w} written of ${rep} reported (${src})`;
+}
 function stageFacts(st) {
   const d = D[st], e = d.e;
   if (e.hamr && e.analysis) {
-    const an = e.analysis.grains, heated = an.filter(melted), ok = heated.filter(a => a.correct).length;
+    const an = d.an, heated = an.filter(melted), ok = heated.filter(a => a.correct).length;
     let now = 0; an.forEach((a, g) => { if (melted(a) && okAt(d, S.f, a, g)) now++; });
-    return [[`✓ at ${timeText(d, d.time[S.f])}`, `${now} / ${heated.length} (${fmt(100 * now / heated.length, 0)} %)`],
-      ["✓ at end", `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`],
+    return [[mk(`melted grains matching their bit at ${timeText(d, d.time[S.f])}`, "i"), `${now} / ${heated.length} (${fmt(100 * now / heated.length, 0)} %)`],
+      [mk("melted grains matching their bit at end", "i"), `${ok} / ${heated.length} (${fmt(100 * ok / heated.length, 0)} %)`],
       ...(() => { const cs = cellParts(d).filter(c => c.want && c.parts.length); if (!cs.length) return [];
         const n = f => cs.filter(c => bitOk(d, c, f)).length;
-        return [[`bits ✓ at ${timeText(d, d.time[S.f])}`, `${n(S.f)} / ${cs.length}`], ["bits ✓ at end", `${n(d.nF - 1)} / ${cs.length}`]]; })(), ["freezing T (measured)", `${fmt(e.Tc, 0)} K`],
-      ["freeze lag", `${fmt(e.freeze_lag_nm)} nm`], ["peak head field", `${fmt(e.hamr.Hpeak, 2)} T`], ["head speed", `${fmt(e.hamr.v, 0)} m/s`],
-      ["bits", e.hamr.bits_per_track * e.hamr.n_tracks], ["bit length", `${fmt(e.hamr.BL)} nm`], ["laser T", `${fmt(e.hamr.Tmin, 0)}–${fmt(e.hamr.Tmax, 0)} K`]];
+        return [[mk(`bits matching intended at ${timeText(d, d.time[S.f])}`, "i"), `${n(S.f)} / ${cs.length}`], [mk("bits matching intended at end", "i"), `${n(d.nF - 1)} / ${cs.length}`]]; })(),
+      [mk("freeze lag in use", "i"), lagText(e).slice(4)], [mk(`freezing T (${tcKind(e)})`, "i"), `${fmt(e.Tc, 0)} K`],
+      ["peak head field", `${fmt(e.hamr.Hpeak, 2)} T`], ["head speed", `${fmt(e.hamr.v, 0)} m/s`],
+      ["bits written", bitsText(e.hamr, true)], ["bit length", `${fmt(e.hamr.BL)} nm`], ["laser T", `${fmt(e.hamr.Tmin, 0)}–${fmt(e.hamr.Tmax, 0)} K`]];
   }
   if (e.type === "monte-carlo") return [["integrator", e.input["sim:integrator"]], ["temperature", `${e.input["sim:temperature"] || "–"} K`],
     ["steps", d.nF > 1 ? Math.round(d.time[d.nF - 1] / e.dt).toLocaleString() : "–"], ["grains", d.nG]];
@@ -1095,7 +1146,7 @@ function stageFacts(st) {
   return [generic && ["program", e.input["sim:program"] || "–"], generic && ["integrator", e.input["sim:integrator"] || "–"],
     generic && ["temperature", `${e.input["sim:temperature"] || "–"} K`], generic && d.nF > 1 && ["steps", Math.round(d.time[d.nF - 1] / e.dt).toLocaleString()],
     generic && ["grains", d.nG], e.ref && !e.v1 && ["compared with", `${S.M.byId[e.ref].title} (${e.ref})`],
-    bits.length && ["bits ✓ (written state)", `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
+    bits.length && [mk(`bits matching intended (written state, ${lagText(writeOf(d))})`, "i"), `${bits.filter(c => bitOk(d, c, d.nF - 1)).length} / ${bits.length}`],
     (e.dipole || !generic) && ["dipole solver", e.input["dipole:solver"] || "–"], e.dipole && ["cells", `${e.dipole.nx - 1} × ${e.dipole.ny - 1} × ${e.dipole.nz - 1}`],
     e.dipole && ["cell size", e.dipole.cell_nm_xyz ? `${e.dipole.cell_nm_xyz.join(" x ")} nm` : `${e.dipole.cell_nm} nm`]];
 }
@@ -1165,18 +1216,36 @@ function drawAnalysis() {
   const sec = $("analysis"), d = cur(), e = d.e;
   if (!e.analysis) { sec.hidden = true; return; }
   sec.hidden = false;
-  const an = e.analysis.grains, heated = an.filter(a => a.intended && a.category !== "unheated"), ok = heated.filter(a => a.correct).length;
+  const an = d.an, sc = scoreOf(an), L = lagOf(e), p = e.hamr;
   const cats = {}; an.forEach(a => { const k = a.category; cats[k] = cats[k] || { n: 0, ok: 0 }; cats[k].n++; if (a.correct) cats[k].ok++; });
-  const th = e.analysis.thresholds;
+  const th = e.analysis.thresholds, given = tcKind(e) !== "inferred";
+  const how = given ? `Tc was given with <code>--tc</code> when the run was reduced, so it is not inferred from the data.`
+    : `Tc is the median laser temperature at the grain centre at the decision moment of ${e.Tc_n != null ? e.Tc_n : "the"} settled melted grains decided under the laser
+       (decision: the frame after the last one with m<sub>z</sub>|m| below ${th.decision} in the final direction). It is an effective value for this head speed, not the Curie temperature.`;
+  const opt = (m, label, extra = "") => `<label><input type="radio" name="lag" value="${m}" ${S.lag.mode === m ? "checked" : ""}> ${label}</label>${extra}`;
   sec.innerHTML = `<h2>Write analysis</h2>
+    ${older(S.M.hamrvis_version) ? `<p class="warn">This bundle was reduced with hamrvis ${S.M.hamrvis_version || "older than 0.9"}, before the current analysis model (${ANALYSIS_MODEL}):
+      its grain outcomes and freezing temperature may differ from what this version computes. Reduce the run again for current numbers.</p>` : ""}
     <div class="stats">
-      <div class="stat"><b>${ok} / ${heated.length}</b><span>melted grains ✓</span></div>
-      <div class="stat"><b>${fmt(100 * ok / heated.length, 0)} %</b><span>success</span></div>
-      <div class="stat"><b>${fmt(e.Tc, 0)} K</b><span>freezing T (measured)</span></div>
-      <div class="stat"><b>${fmt(e.freeze_lag_nm)} nm</b><span>freeze lag</span></div>
-      <div class="stat"><b>${fmt(e.hamr.Hpeak, 2)} T</b><span>peak head field</span></div>
+      <div class="stat"><b>${sc.ok} / ${sc.n} (${fmt(100 * sc.ok / sc.n, 0)} %)</b><span>${mk("melted grains matching their intended bit", "i")}, ${lagText(e)}${sc.out ? `; ${sc.out} melted outside the bit cells left out` : ""}</span></div>
+      <div class="stat"><b>${fmt(e.Tc, 0)} K</b><span>${mk(`freezing T (${tcKind(e)})`, "i")}</span></div>
+      <div class="stat"><b>${fmt(e.freeze_lag_nm, 2)} nm</b><span>${mk(`freeze lag from it`, "i")}</span></div>
+      <div class="stat"><b>${fmt(p.Hpeak, 2)} T</b><span>${mk("peak head field", "c")}</span></div>
     </div>
+    <div class="lagctl" role="radiogroup" aria-label="Freeze lag">
+      <b>Freeze lag</b>
+      ${opt("inferred", `${given ? "from --tc" : "inferred"} (${fmt(e.freeze_lag_nm, 2)} nm)`)}
+      ${opt("none", "none (0 nm)")}
+      ${opt("custom", "custom", ` <input type="number" id="lag-custom" step="0.1" value="${S.lag.custom}" aria-label="custom lag (nm)"> nm`)}
+      ${opt("centres", "from bit centres", ` <input type="text" id="lag-centres" value="${S.lag.centres}" placeholder="x of bit 1, 2, … (nm)" aria-label="bit centre positions (nm)">`)}
+      <span class="lagnow">in use: ${fmt(L.lag, 2)} nm (${L.src}); changes only this view, never the bundle</span>
+    </div>
+    <p class="how">Bit b of a track covers x from b·BL − lag to (b + 1)·BL − lag: grains freeze a lag behind the laser centre, where the track centre line cools through
+      the freezing temperature, lag = σ<sub>x</sub> √(2 ln((T<sub>max</sub> − T<sub>min</sub>) / (Tc − T<sub>min</sub>))). ${how}
+      One lag is used across the whole track, although grains off the track centre freeze closer to the laser centre (the isotherm is an ellipse): a limit of this model.</p>
     <div class="figs">
+      <div class="fig"><h3>Score against lag</h3><svg id="lagscan" role="img" aria-label="Melted grains matching their intended bit against the freeze lag"></svg>
+        <div class="figkey"><span><i class="line solid"></i>lag in use</span><span><i class="line"></i>${given ? "from --tc" : "inferred"}</span></div></div>
       <div class="fig"><h3>Decision positions</h3><svg id="scatter" role="img" aria-label="Decision positions"></svg>
         <div class="figkey"><span><i style="background:var(--ok)"></i>✓</span><span><i style="background:var(--bad)"></i>✗</span><span><i class="line"></i>${fmt(e.Tc, 0)} K isotherm</span></div></div>
       <div class="fig"><h3>Outcome by field at decision</h3><div class="tablewrap"><table>
@@ -1185,8 +1254,35 @@ function drawAnalysis() {
         </tbody></table></div>
         ${kv([["decided", `m<sub>z</sub>|m| last below ${th.decision} in final direction`], ["melted", `|m| < ${th.heated} and lost direction`],
               ["undecided", `|final m<sub>z</sub>| < ${th.settled}`], ["reversal", `|B| < ${th.full_field} B<sub>peak</sub>`]])}</div>
-    </div>`;
+    </div>
+    <p class="how">${markKey}</p>`;
+  sec.querySelectorAll('input[name="lag"]').forEach(r => r.onchange = () => { S.lag.mode = r.value; applyLag(); });
+  $("lag-custom").onchange = ev => { S.lag.custom = +ev.target.value || 0; S.lag.mode = "custom"; applyLag(); };
+  $("lag-centres").onchange = ev => { S.lag.centres = ev.target.value; S.lag.mode = "centres"; applyLag(); };
+  drawLagScan(d, L.lag);
   drawScatter(d, an);
+}
+// share of melted grains matching their bit at each lag from 0 to 3 bits (or twice the inferred lag)
+function drawLagScan(d, now) {
+  const svg = $("lagscan"), w = svg.clientWidth || 480, h = 280, NS = "http://www.w3.org/2000/svg", e = d.e, inf = e.freeze_lag_nm || 0;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`); svg.style.height = h + "px";
+  const el = (tag, at, txt) => { const n = document.createElementNS(NS, tag); for (const k in at) n.setAttribute(k, at[k]); if (txt != null) n.textContent = txt; svg.appendChild(n); return n; };
+  const xmax = Math.max(3 * e.hamr.BL, 2 * inf, now * 1.2, 1), N = 150;
+  const pts = Array.from({ length: N + 1 }, (_, i) => { const l = i / N * xmax, s = scoreOf(scoreGrains(e, l)); return [l, s.n ? s.ok / s.n : 0, s]; });
+  const L = 44, R = 12, T = 10, B = 32, sx = v => L + v / xmax * (w - L - R), sy = v => T + (1 - v) * (h - T - B);
+  const dx = [1, 2, 5, 10, 20, 50, 100].find(v => xmax / v <= 8) || 100;
+  for (let v = 0; v <= xmax + 1e-9; v += dx) { el("line", { x1: sx(v), x2: sx(v), y1: T, y2: h - B, stroke: css("--rule") }); el("text", { x: sx(v), y: h - B + 14, "text-anchor": "middle", fill: css("--muted"), "font-size": 11 }, v); }
+  for (let v = 0; v <= 1; v += .25) { el("line", { x1: L, x2: w - R, y1: sy(v), y2: sy(v), stroke: css("--rule") }); el("text", { x: L - 6, y: sy(v) + 4, "text-anchor": "end", fill: css("--muted"), "font-size": 11 }, `${v * 100}`); }
+  el("text", { x: (L + w - R) / 2, y: h - 4, "text-anchor": "middle", fill: css("--muted"), "font-size": 11.5 }, "freeze lag (nm)");
+  el("text", { x: 12, y: (T + h - B) / 2, "text-anchor": "middle", fill: css("--muted"), "font-size": 11.5, transform: `rotate(-90 12 ${(T + h - B) / 2})` }, "matching their bit (%)");
+  el("path", { d: pts.map(([l, v], i) => (i ? "L" : "M") + sx(l).toFixed(1) + " " + sy(v).toFixed(1)).join(""), fill: "none", stroke: css("--ink"), "stroke-width": 1.6 });
+  el("line", { x1: sx(inf), x2: sx(inf), y1: T, y2: h - B, stroke: css("--muted"), "stroke-width": 1.2, "stroke-dasharray": "4 3" });
+  el("line", { x1: sx(now), x2: sx(now), y1: T, y2: h - B, stroke: css("--ink"), "stroke-width": 1.6 });
+  const s = scoreOf(d.an);
+  el("circle", { cx: sx(now), cy: sy(s.n ? s.ok / s.n : 0), r: 4, fill: css("--ink") });
+  svg.onmousemove = ev => { const r = svg.getBoundingClientRect(), l = Math.max(0, Math.min(xmax, ((ev.clientX - r.left) / r.width * w - L) / (w - L - R) * xmax)), q = pts[Math.round(l / xmax * N)];
+    showTip(ev, kv([["lag", `${fmt(q[0], 2)} nm`], ["matching", `${q[2].ok} / ${q[2].n} (${fmt(100 * q[1], 0)} %)`], ["left out", q[2].out]])); };
+  svg.onmouseleave = hideTip;
 }
 function drawScatter(d, an) {
   const svg = $("scatter"), w = svg.clientWidth || 480, h = 280, NS = "http://www.w3.org/2000/svg", e = d.e, p = e.hamr;
@@ -1217,7 +1313,18 @@ function drawDetails() {
   const facts = [["source", e.source], ["reduced", `${S.M.created} with hamrvis ${S.M.hamrvis_version || "older than 0.9"}`], ["viewer", `hamrvis ${HAMRVIS_VERSION}`]];
   const from = e.grain_map && (e.grain_map.from_run || e.grain_map.from_stage);
   if (e.segments && e.segments.length > 1) facts.splice(1, 0, ["continued in", e.segments.slice(1).join(", ")]);
+  if (older(S.M.hamrvis_version) && S.M.runs.some(r => r.analysis)) facts.push(["warning", `reduced before the current analysis model (hamrvis ${ANALYSIS_MODEL}): reduce again for current write analysis numbers`]);
+  if (e.hamr) {
+    facts.push(["bits", bitsText(e.hamr)]);
+    const hc = e.head_check, part = (c, what) => c.bad ? `<b>${c.bad} of ${c[what]} differ</b>` : `all ${c[what]} agree`;
+    facts.push(["head model vs VAMPIRE", !hc ? "not checked (bundle made before hamrvis checked it at reduce time)" : !hc.B_applied && !hc.positions ? "not verifiable: no B_applied column in the output and no head positions in the log"
+      : [hc.B_applied && `B_applied: ${part(hc.B_applied, "rows")} rows, max diff ${hc.B_applied.max_diff.toExponential(1)} T${hc.B_applied.left_out ? ` (${hc.B_applied.left_out} rows left out: their printed time does not resolve one step)` : ""}`,
+         hc.positions && `logged head positions: ${part(hc.positions, "lines")}, max diff ${hc.positions.max_dx_nm.toExponential(1)} nm (x), ${hc.positions.max_dy_nm.toExponential(1)} nm (y)`].filter(Boolean).join("; ")]);
+  }
+  if (e.analysis) facts.push(["freezing T", `${fmt(e.Tc, 0)} K, ${e.Tc_source || "–"}${e.Tc_n != null ? ` (${e.Tc_n} grains)` : ""}`], ["freeze lag in use", lagText(e).slice(4)]);
   for (const n of e.notes || []) facts.push(["note", n]);
+  if (e.grain_time_note) facts.push(["note", e.grain_time_note]);
+  if (e.snapshots && e.snapshots.skipped && e.snapshots.skipped.length) facts.push(["note", `snapshot${e.snapshots.skipped.length > 1 ? "s" : ""} ${e.snapshots.skipped.join(", ")} could not be read and ${e.snapshots.skipped.length > 1 ? "are" : "is"} left out (the reduce log says why)`]);
   if (e.grain_map) facts.push(["grain shapes", `from atom coordinates${from ? ` (${from} ${e.grain_map.from_run ? "run" : "stage"})` : ""}, ${e.grain_map.mixed_columns} mixed columns`]);
   if (ck) {
     facts.push(["stored columns vs exact", `≤ ${fmt(ck.column_rounding_max, 4)}`]);
@@ -1225,7 +1332,7 @@ function drawDetails() {
     if (ck.grain_txt_one_step_earlier && ck.grain_txt_one_step_earlier.n) facts.push(["grain.txt, 1 step earlier", `${ck.grain_txt_one_step_earlier.n} snapshots, median ${ck.grain_txt_one_step_earlier.median_diff.toExponential(1)}, max ${ck.grain_txt_one_step_earlier.max_diff.toExponential(1)}`]);
   }
   const rows = Object.entries(e.input).map(([k, v]) => `<div><span>${k}</span><span>${v === "" ? "on" : v}${e.input_units[k] ? " " + e.input_units[k] : ""}</span></div>`).join("");
-  sec.innerHTML = `<h2>Run details</h2><div class="detail-facts">${kv(facts)}</div><div class="params">${rows}</div>`;
+  sec.innerHTML = `<h2>Run details</h2><div class="detail-facts">${kv(facts)}<p class="how">${markKey}</p></div><div class="params">${rows}</div>`;
 }
 
 // ------------------------------------------------------------------------------------------------ tooltip
@@ -1343,7 +1450,8 @@ function savePng() {
   const W = Math.max(...cs.map(c => c.width)), H = cs.reduce((s, c) => s + c.height + 6 * r, head);
   const out = off(W, H), x = out.getContext("2d");
   x.fillStyle = css("--bg"); x.fillRect(0, 0, W, H);
-  x.fillStyle = css("--ink"); x.font = `700 ${18 * r}px ${css("--font")}`; x.fillText(`${S.M.name}: ${stageTitle(S.stage)}, ${timeText(cur(), cur().time[S.f])}`, 0, 24 * r);
+  x.fillStyle = css("--ink"); x.font = `700 ${18 * r}px ${css("--font")}`; const wr = writeOf(cur());
+  x.fillText(`${S.M.name}: ${stageTitle(S.stage)}, ${timeText(cur(), cur().time[S.f])}${wr && wr.analysis ? `, ${lagText(wr)}` : ""}`, 0, 24 * r);
   let y = head; for (const c of cs) { x.drawImage(c, 0, y); y += c.height + 6 * r; }
   const a = document.createElement("a"); a.href = out.toDataURL("image/png");
   a.download = `${S.M.name}-${S.stage}-${S.f}.png`; a.click();
@@ -1377,7 +1485,7 @@ async function setStage(st) {
 // one tab per run, in run order; the line under the title says what the run is
 function runSub(e) {
   const T = e.input["sim:temperature"];
-  if (e.hamr) return `${e.hamr.bits_per_track * e.hamr.n_tracks} bits, ${fmt(e.hamr.v, 0)} m/s`;
+  if (e.hamr) return `${(e.hamr.written ?? e.hamr.bits_per_track) * e.hamr.n_tracks} bits, ${fmt(e.hamr.v, 0)} m/s`;
   if (e.type === "monte-carlo") return `${e.input["sim:integrator"] || "relax"}, ${T || ""} K`;
   if (e.dipole) return "dipole field";
   return e.v1 ? "1 step" : [e.input["sim:integrator"], T && `${T} K`].filter(Boolean).join(", ");
@@ -1428,4 +1536,5 @@ async function main() {
   await setStage(S.M.byId[want] ? want : any.id);
   window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (S.M.byId[h] && h !== S.stage) setStage(h); });
 }
+window.HV_TEST = { scoreGrains, scoreOf, lagOf, applyLag, S, D };   // for the tests: the scoring the page draws
 main();

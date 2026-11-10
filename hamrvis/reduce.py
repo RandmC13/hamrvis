@@ -373,8 +373,10 @@ def _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor):
         raise SystemExit(f"{cfiles[0]}: no magnetic atoms in the coordinate files")
     grid = Grid(Lx, Ly, stats, layer_factor, opts.get("top_max", TOP_MAX), opts.get("layer_max", LAYER_MAX))
     if not have_ids:
-        log("  WARNING: the coordinate files hold no grain IDs (older text format): grain shapes stay VAMPIRE's "
-            "approximate Voronoi outlines and snapshots are not checked against grain.txt")
+        msg = ("the coordinate files hold no grain IDs (older text format): grain shapes stay VAMPIRE's "
+               "approximate Voronoi outlines and snapshots are not checked against grain.txt")
+        log("  WARNING: " + msg)
+        entry["notes"] = entry.get("notes", []) + [msg]
     ct, cv = np.zeros(grid.ny * grid.nx), np.zeros(grid.nz * grid.vy * grid.vx)
     cx, sx, cy, sy, na = (np.zeros(nG + 1) for _ in range(5))
     keys, counts = None, None
@@ -774,11 +776,17 @@ def write_analysis(h, entry, lead, series, Tc=None, thresholds=None):
         Td = Td[Td > h.Tmin + 0.05 * (h.Tmax - h.Tmin)]     # decisions under the laser, not thermal flips far from it
         Tc = float(np.median(Td)) if len(Td) else None
         entry["Tc_source"] = "median grain-centre laser temperature at the decision moment of heated grains"
+        entry["Tc_kind"], entry["Tc_n"] = "inferred", int(len(Td))
     else:
         entry["Tc_source"] = "given on the command line"
+        entry["Tc_kind"] = "given"
     entry["Tc"] = Tc
     lag = h.freeze_lag(Tc) if Tc and h.Tmin < Tc < h.Tmax else 0.0
     entry["freeze_lag_nm"] = lag
+    if not lag:
+        entry["notes"] = entry.get("notes", []) + ["no freezing temperature between the laser's minimum and maximum "
+                                                   "(no settled grain decided under the laser, or --tc outside it): "
+                                                   "grains are scored with no freeze lag"]
 
     res = []
     for i in range(len(gx)):
@@ -958,6 +966,8 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
                  dt=inp.num("sim:time-step", 1e-15, "time"), monte_carlo=rn.is_monte_carlo(inp),
                  size_nm=inp.system_size(),
                  magnetic_types=magnetic_types(run))
+        if e["magnetic_types"] is None:
+            e["notes"] = ["every material counted as magnetic: the material file is missing or names no material[n] keys"]
         if r.type != "hamr" and last_hamr:
             e["ref"] = last_hamr                       # the write whose bits this run is compared with
         for f in ("log", "stdout", "time.txt"):
@@ -974,6 +984,16 @@ def reduce(paths, out, volume=True, every=1, Tc=None, workers=None, name=None, l
         if r.type == "hamr":
             h = vp.Hamr(run, r.dirs)
             e["hamr"] = h.params()
+            if h.written_source == "formula":
+                e["notes"] = e.get("notes", []) + [f"bits written per track ({h.written} of {h.bits_per_track}) taken from "
+                                                   "VAMPIRE's bit loop, as the log has no whole track"]
+            cols = e["output"]["columns"]
+            table = np.fromfile(os.path.join(sd, "output.f64")).reshape(-1, len(cols))
+            e["head_check"] = h.check(r.dirs, cols, table)
+            bad = {k: v["bad"] for k, v in e["head_check"].items() if v["bad"]}
+            if bad:
+                e["notes"] = e.get("notes", []) + [f"head model differs from VAMPIRE's record: {bad}"]
+                log(f"  WARNING: head model differs from VAMPIRE's record: {bad}")
             if lead is not None:
                 write_analysis(h, e, lead, series, Tc, opts.get("thresholds"))
             last_hamr = r.id
