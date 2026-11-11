@@ -198,7 +198,7 @@ class ViewerFidelity(unittest.TestCase):
         self.assertGreaterEqual(n, 5)
 
     def test_real_bundles(self):
-        found = [os.path.join(ROOT, "bundles", b) for b in ("h3", "2x11") if os.path.exists(os.path.join(ROOT, "bundles", b, "manifest.json"))]
+        found = [os.path.join(ROOT, "bundles", b) for b in ("h3", "h3-v1", "2x11") if os.path.exists(os.path.join(ROOT, "bundles", b, "manifest.json"))]
         if not found:
             self.skipTest("real-run bundles in bundles/ (git-ignored) not present")
         for b in found:

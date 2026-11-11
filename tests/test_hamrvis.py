@@ -349,7 +349,7 @@ class Bundles(unittest.TestCase):
     def test_viewer_scores_grains_as_the_reducer(self):
         # the viewer rescores the write at the lag in use; at the bundle's own lag it must give the reducer's numbers
         manifests = list(self.man.values())
-        for name in ("h3", "2x11"):   # real-run bundles in bundles/ (git-ignored), when present
+        for name in ("h3", "h3-v1", "2x11"):   # real-run bundles in bundles/ (git-ignored), when present
             mp = os.path.join(HERE, "..", "bundles", name, "manifest.json")
             if os.path.exists(mp):
                 manifests.append(json.load(open(mp, encoding="utf-8")))

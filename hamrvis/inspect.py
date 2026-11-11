@@ -92,7 +92,9 @@ def run_report(r, opts):
                     gbytes += min(red.OVERVIEW_BINS, fr) * nG * 8
                 size += gbytes
                 sec += sum(os.path.getsize(os.path.join(x, "grain.txt")) for x in r.dirs) / (GRAIN_MB_PER_S * 1e6)
-                say(f"  grain views   yes: {nG} grains x {frames} frames in grain.txt ({_mb(gbytes)} in the bundle)")
+                est = any(os.path.getsize(os.path.join(x, "grain.txt")) > 1 << 28 for x in r.dirs)   # _table_rows estimates these
+                say(f"  grain views   yes: {nG} grains x {'~' if est else ''}{frames} frames in grain.txt"
+                    f"{' (estimated from the file size)' if est else ''} ({_mb(gbytes)} in the bundle)")
             except ValueError as err:
                 say(f"  grain views   no: grain.txt not usable: {err}")
     # atoms
