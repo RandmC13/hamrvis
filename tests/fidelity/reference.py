@@ -158,3 +158,74 @@ def column_means(xyz, s, pitch_A, nx, ny, factor=1, sites=None):
             m = np.bincount(k, s[:, c], minlength=nx * ny) / count
         out[c] = np.where(count > 0, m, np.nan).reshape(ny, nx)
     return out
+
+
+class Head:
+    """The HAMR head at a step, from the head parameters of a bundle (themselves checked against the input by
+    test_head_parameters_in_any_units), written from the definitions in docs/analysis.md and src/hamr/hamr_continuous.cpp:
+    the laser starts half a bit plus NPS before the film, moves step_nm per step, writes bits_per_track bits of nb
+    steps after a lead-in of ne steps with the field off; scalar on purpose."""
+
+    def __init__(self, p):
+        self.p = p
+        self.w = p.get("written", p["bits_per_track"])
+
+    def at(self, step):
+        """(laser x, laser y, on, track, step in track j)."""
+        p = self.p
+        k = int(step) - p["eq"]
+        on = 1 <= k <= p["n_tracks"] * p["nt"]
+        kk = max(k, 1)
+        track, j = (kk - 1) // p["nt"], (kk - 1) % p["nt"] + 1
+        x = -p["BL"] / 2 - p["NPS"] + (j + 1) * p["step_nm"]
+        y = p["TW"] * ((track * self.w) // max(p["bits_per_track"], 1) + 0.5) + p["pad"]
+        return x, y, on, track, j
+
+    def field(self, step):
+        """Signed head field (T) along the field unit vector."""
+        p = self.p
+        _, _, on, track, j = self.at(step)
+        i = j - 1 - p["ne"]                              # step within the written part of the track
+        if not on or i < 0:
+            return 0.0
+        b, i = divmod(i, p["nb"])
+        if b >= p["bits_per_track"]:
+            return 0.0
+        mag = (p["nb"] - 1 - i) / p["fall"] if i >= p["nb"] - p["fall"] else min((i + 1) / p["rise"], 1.0)
+        seq = p["sequence"]
+        return mag * p["Hpeak"] * seq[min(track * p["bits_per_track"] + b, len(seq) - 1)]
+
+    def bit(self, step):
+        """(track, bit) the field is writing, or None."""
+        p = self.p
+        _, _, on, track, j = self.at(step)
+        i = j - 1 - p["ne"]
+        return (track, i // p["nb"]) if on and i >= 0 and i // p["nb"] < self.w else None
+
+    def T(self, x, y, step):
+        p = self.p
+        hx, hy, on, _, _ = self.at(step)
+        if not on:
+            return p["Tmin"]
+        return p["Tmin"] + (p["Tmax"] - p["Tmin"]) * np.exp(-(x - hx) ** 2 / (2 * p["sigma_x"] ** 2) - (y - hy) ** 2 / (2 * p["sigma_y"] ** 2))
+
+    def in_box(self, x, y, step):
+        p = self.p
+        hx, hy, on, _, _ = self.at(step)
+        return on and abs(x - (hx - p["NPS"])) <= p["box_x"] / 2 and abs(y - hy) <= p["box_y"] / 2
+
+    def peak_T(self, x, y):
+        """Hottest laser temperature ever at (x, y): the laser centre comes closest at the nearest point of its path
+        (x from the first to the last step of a track) on the nearest track."""
+        p = self.p
+        x0 = -p["BL"] / 2 - p["NPS"] + 2 * p["step_nm"]
+        x1 = -p["BL"] / 2 - p["NPS"] + (p["nt"] + 1) * p["step_nm"]
+        dx = min(max(x, x0), x1) - x
+        best = max(np.exp(-dx ** 2 / (2 * p["sigma_x"] ** 2) - (y - self.at(p["eq"] + t * p["nt"] + 1)[1]) ** 2 / (2 * p["sigma_y"] ** 2))
+                   for t in range(p["n_tracks"]))
+        return p["Tmin"] + (p["Tmax"] - p["Tmin"]) * best
+
+    def pass_step(self, x, track):
+        """Step at which the laser centre is over x on a track."""
+        p = self.p
+        return p["eq"] + track * p["nt"] + round((x + p["BL"] / 2 + p["NPS"]) / p["step_nm"]) - 1

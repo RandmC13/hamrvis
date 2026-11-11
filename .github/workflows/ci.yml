@@ -36,6 +36,6 @@ jobs:
           node-version: 22
       - run: python -m pip install .
       - run: npm install --prefix tests playwright@1.48.2 && npx --prefix tests playwright install --with-deps chromium
-      - run: python -m unittest tests.test_viewer_smoke
+      - run: python -m unittest tests.test_viewer_smoke tests.test_viewer_readouts tests.test_viewer_pixels
         env:
           HAMRVIS_REQUIRE_VIEWER_TEST: "1"

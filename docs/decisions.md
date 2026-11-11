@@ -202,6 +202,12 @@ Measured on a generated run (`tests/make_large.py`, 2000 x 60 nm, 99.84M atoms i
 - `tests/test_hamrvis.py`: field model vs VAMPIRE's B_applied, default 2 T peak, column averages vs a direct numpy
   computation, analysis output, export, and the viewer's JavaScript model vs the Python one (node).
 - `tests/test_viewer_smoke.py`: every scenario in a real browser through Playwright.
+- `tests/test_viewer_readouts.py`: what the page prints and plots (clock, film, bits and stray field tooltips, scrubber,
+  life story, space-time, score against lag, read-back waveform) at several frames of every run, against values worked
+  out from the bundle and an independent head model (`tests/fidelity/reference.py`); printed numbers to the digits shown.
+- `tests/test_viewer_pixels.py`: sampled pixels of every view and colour mode decoded through the colour map against the
+  data under them (one screen pixel of placement, one colour entry), the stray field map against the bilinear blend of
+  its cells, and the selected grain's outline against its grain-map boundary.
 
 ## Ideas not done yet
 

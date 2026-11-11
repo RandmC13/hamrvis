@@ -38,6 +38,7 @@ const S = { M: null, stage: null, f: 0, fa: 0, view: "grains", colour: "mz", lay
             win: { x0: 0, x1: 1 }, dspan: 1, y0: 0, follow: true,
             lag: { mode: "inferred", custom: 0, centres: "" } };   // freeze lag used to score the write (viewer state only)
 const D = {};                                                    // per-stage data, filled by loadStage
+const REC = {};                                                  // the values each chart last drew, read back by the tests
 const $ = id => document.getElementById(id);
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const fmt = (v, d = 1) => (v == null || !isFinite(v)) ? "–" : v.toFixed(d);
@@ -825,6 +826,7 @@ function waveLane() {
     height: () => 160,
     draw(ctx, w, h) {
       const d = cur(), wv = waveform(d), lim = Math.max(...wv.map(Math.abs)) * 1.15 || 1e-3, P = d.e.dipole;
+      REC.wave = { ysec: S.ysec, rw: S.rw, z: S.z, v: wv };
       ctx.clearRect(0, 0, w, h);
       const y = v => h / 2 - v / lim * (h / 2 - 8);
       ctx.strokeStyle = css("--rule"); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(w, y(0)); ctx.stroke();
@@ -988,24 +990,28 @@ function drawScrub() {
     const ci = n => d.cols.findIndex(c => c.endsWith(n)), iz = ci("M_norm_z"), il = ci("M_norm_l"), nc = d.cols.length, rows = d.out.length / nc;
     const tcol = d.cols.indexOf("Real_time"), t1 = d.time[d.nF - 1] || 1;
     const series = [];
-    if (il >= 0) series.push({ v: r => d.out[r * nc + il], col: css("--muted"), lo: 0, hi: 1 });
-    if (iz >= 0) series.push({ v: r => d.out[r * nc + iz] * (il >= 0 ? d.out[r * nc + il] : 1), col: css("--ink"), lo: -1, hi: 1 });
+    if (il >= 0) series.push({ key: "M_l", v: r => d.out[r * nc + il], col: css("--muted"), lo: 0, hi: 1 });
+    if (iz >= 0) series.push({ key: "M_z", v: r => d.out[r * nc + iz] * (il >= 0 ? d.out[r * nc + il] : 1), col: css("--ink"), lo: -1, hi: 1 });
+    REC.scrub = { w, t1, mode: rows <= SCRUB_ALL_ROWS ? "rows" : "minmax", series: [] };
     for (const s of series) {
+      const rec = [];
       ctx.strokeStyle = s.col; ctx.lineWidth = 1.5; ctx.beginPath();
       const yOf = v => h - 3 - (v - s.lo) / (s.hi - s.lo) * (h - 6), tOf = r => tcol >= 0 ? d.out[r * nc + tcol] : r / rows * t1;
       if (rows <= SCRUB_ALL_ROWS) {
         const stepR = Math.max(1, Math.floor(rows / (w * 2)));
         for (let r = 0; r < rows; r += stepR) {
           const yy = yOf(s.v(r));
+          rec.push([r, tOf(r), s.v(r)]);
           r ? ctx.lineTo(tOf(r) / t1 * w, yy) : ctx.moveTo(tOf(r) / t1 * w, yy);
         }
       } else {     // lowest and highest value in each pixel column, so a short event in a long run stays visible
         const lo = new Float64Array(Math.ceil(w) + 1).fill(Infinity), hi = new Float64Array(Math.ceil(w) + 1).fill(-Infinity);
         for (let r = 0; r < rows; r++) { const k = Math.max(0, Math.min(lo.length - 1, Math.floor(tOf(r) / t1 * w))), v = s.v(r); if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
         let first = true;
-        for (let k = 0; k < lo.length; k++) if (hi[k] >= lo[k]) { first ? ctx.moveTo(k + .5, yOf(lo[k])) : ctx.lineTo(k + .5, yOf(lo[k])); ctx.lineTo(k + .5, yOf(hi[k])); first = false; }
+        for (let k = 0; k < lo.length; k++) if (hi[k] >= lo[k]) { rec.push([k, lo[k], hi[k]]); first ? ctx.moveTo(k + .5, yOf(lo[k])) : ctx.lineTo(k + .5, yOf(lo[k])); ctx.lineTo(k + .5, yOf(hi[k])); first = false; }
       }
       ctx.stroke();
+      REC.scrub.series.push({ key: s.key, pts: rec });
     }
   }
   const x = tx(S.f);
@@ -1104,6 +1110,8 @@ function drawSt() {
   for (let t = 0; t <= tEnd + 1e-15; t += dtick) ctx.fillText(timeText(d, t), Math.min(w - 20, tx(Math.round(t / d.e.dt))), h - 5);
   const xc = tx(d.steps[S.f]); ctx.fillStyle = css("--ink"); ctx.fillRect(xc - .75, top - 3, 1.5, rowH * rows.length + 6);
   c._map = { rows, left, top, rowH, pw, t0, t1 };
+  REC.st = { rows: [...rows], pass: d.model ? rows.map(g => d.model.passStep(d.e.grains.x[g], d.an ? d.an[g].track : 0)) : null,
+             dec: d.an ? rows.map(g => d.an[g].decision_step ?? null) : null };
   $("st-meta").innerHTML = `<span>${rows.length} grains${S.stAll ? "" : " (melted)"}, sorted by x (nm)</span><span>dashed: laser centre passes</span><span>tick: decision</span>`;
 }
 function stPick(ev) {
@@ -1208,10 +1216,12 @@ function drawStory(d, g, a) {
   const sampled = d.ov ? grainSamples(d, g, f0, f1, pst) : null;
   const vmz = sampled ? f => sampled.mz.get(f) : f => gmz(d, f, g), vml = sampled ? f => sampled.ml.get(f) : f => gml(d, f, g);
   const panels = [];
-  if (m) panels.push({ name: "T (K)", lo: m.p.Tmin, hi: m.p.Tmax, v: f => m.T(gx, gy, d.steps[f]), col: css("--ink"), ref: d.e.Tc });
-  panels.push({ name: "|m|", lo: 0, hi: 1, v: vml, col: css("--muted"), series: true });
-  panels.push({ name: "m<tspan baseline-shift='sub' font-size='9'>z</tspan>", lo: -1, hi: 1, v: vmz, col: css("--up"), ref: 0, series: true });
-  if (m) panels.push({ name: "B<tspan baseline-shift='sub' font-size='9'>z</tspan> (T)", lo: -m.p.Hpeak, hi: m.p.Hpeak, v: f => { const hd = m.head(d.steps[f]); return m.inBox(gx, gy, hd) ? m.field(d.steps[f]) * m.p.field_uz : 0; }, col: css("--down"), ref: 0 });
+  if (m) panels.push({ key: "T", name: "T (K)", lo: m.p.Tmin, hi: m.p.Tmax, v: f => m.T(gx, gy, d.steps[f]), col: css("--ink"), ref: d.e.Tc });
+  panels.push({ key: "m", name: "|m|", lo: 0, hi: 1, v: vml, col: css("--muted"), series: true });
+  panels.push({ key: "mz", name: "m<tspan baseline-shift='sub' font-size='9'>z</tspan>", lo: -1, hi: 1, v: vmz, col: css("--up"), ref: 0, series: true });
+  if (m) panels.push({ key: "Bz", name: "B<tspan baseline-shift='sub' font-size='9'>z</tspan> (T)", lo: -m.p.Hpeak, hi: m.p.Hpeak, v: f => { const hd = m.head(d.steps[f]); return m.inBox(gx, gy, hd) ? m.field(d.steps[f]) * m.p.field_uz : 0; }, col: css("--down"), ref: 0 });
+  const fs = []; for (let f = f0; f <= f1; f += pst) fs.push(f);
+  REC.story = { g, f0, f1, pst, ready: !(d.ov && !sampled.ready), panels: panels.map(P => ({ key: P.key, pts: fs.map(f => [f, P.v(f)]) })) };
   const L = 6, R = 6, top = 4, gap = 8, bot = 16, ph = (H - top - bot - gap * (panels.length - 1)) / panels.length;
   const tx = f => L + (f - f0) / Math.max(1, f1 - f0) * (w - L - R);
   panels.forEach((P, i) => {
@@ -1291,6 +1301,7 @@ function drawLagScan(d, now) {
   const el = (tag, at, txt) => { const n = document.createElementNS(NS, tag); for (const k in at) n.setAttribute(k, at[k]); if (txt != null) n.textContent = txt; svg.appendChild(n); return n; };
   const xmax = Math.max(3 * e.hamr.BL, 2 * inf, now * 1.2, 1), N = 150;
   const pts = Array.from({ length: N + 1 }, (_, i) => { const l = i / N * xmax, s = scoreOf(scoreGrains(e, l)); return [l, s.n ? s.ok / s.n : 0, s]; });
+  REC.lagscan = pts.map(([l, , s]) => [l, s.ok, s.n, s.out]);
   const L = 44, R = 12, T = 10, B = 32, sx = v => L + v / xmax * (w - L - R), sy = v => T + (1 - v) * (h - T - B);
   const dx = [1, 2, 5, 10, 20, 50, 100].find(v => xmax / v <= 8) || 100;
   for (let v = 0; v <= xmax + 1e-9; v += dx) { el("line", { x1: sx(v), x2: sx(v), y1: T, y2: h - B, stroke: css("--rule") }); el("text", { x: sx(v), y: h - B + 14, "text-anchor": "middle", fill: css("--muted"), "font-size": 11 }, v); }
@@ -1558,5 +1569,6 @@ async function main() {
   await setStage(S.M.byId[want] ? want : any.id);
   window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (S.M.byId[h] && h !== S.stage) setStage(h); });
 }
-window.HV_TEST = { scoreGrains, scoreOf, lagOf, applyLag, S, D, grainAt, cellParts, stageFacts, drawInspector, timeText };   // read back by the tests
+window.HV_TEST = { scoreGrains, scoreOf, lagOf, applyLag, S, D, REC, LUT, grainAt, cellParts, stageFacts, drawInspector, timeText,
+                   filmTip, drawAll, seek, lanes: () => LANES };   // read back by the tests
 main();
