@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1 (unreleased)
+
+Fixed:
+
+- A grain with no magnetic atoms (a non-magnetic layer VAMPIRE gives a grain ID, for which `grain.txt` holds 0) is no
+  longer counted as a melted, undecided grain: it was part of the score's denominator (the large run read 116 / 143,
+  not 116 / 142). Such grains now have the category "no magnetic atoms" and are left out of the write analysis.
+  Bundles reduced before this open with the warning that their analysis is older.
+
 ## 0.9.0 (unreleased)
 
 First packaged version.

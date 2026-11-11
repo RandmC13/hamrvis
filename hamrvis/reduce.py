@@ -620,12 +620,14 @@ class GrainAccumulator:
         self.final = np.zeros(n_grains, np.float32)
         self.last_m = np.zeros(n_grains, np.float32)
         self.min_m = np.full(n_grains, np.inf, np.float32)
+        self.max_m = np.zeros(n_grains, np.float32)
         self.last = np.full((2, n_grains), -1, np.int64)            # [0]: direction +, [1]: direction -
         self.after = np.zeros((2, n_grains), np.float32)
 
     def add(self, m):
         mz, ml = m[:, 2] * m[:, 3], m[:, 3]
         np.minimum(self.min_m, ml, out=self.min_m)
+        np.maximum(self.max_m, ml, out=self.max_m)
         for i, v in enumerate((mz, -mz)):
             arrived = self.last[i] == self.n - 1
             self.after[i][arrived] = ml[arrived]
@@ -644,7 +646,7 @@ class GrainAccumulator:
         m_dec = np.where(last + 1 >= self.n, self.last_m, self.after[d, i])
         return final, self.min_m, last >= 0, dec, m_dec
 
-    ARRAYS = ("final", "last_m", "min_m", "last", "after")
+    ARRAYS = ("final", "last_m", "min_m", "max_m", "last", "after")
 
 
 def _stream_grains(dirs, out_dir, entry, n_grains, dt, opts, check_steps):
@@ -762,7 +764,11 @@ def write_analysis(h, entry, lead, series, Tc=None, thresholds=None):
     B = h.field(steps) * h.field_uz                                  # z field inside the box
     final, minM, any_below, dec, m_dec = series["acc"].outcome()
     sgn = np.sign(final)
-    heated = (minM < HEATED) & any_below
+    # grains with no magnetic atoms (e.g. a non-magnetic layer given a grain ID): VAMPIRE writes 0 for them, which
+    # would otherwise read as melted; without atom counts (no coordinate files), |m| = 0 in every frame marks them
+    na = g.get("magnetic_atoms")
+    empty = np.asarray(na) == 0 if na is not None else series["acc"].max_m == 0
+    heated = (minM < HEATED) & any_below & ~empty
     # laser temperature at the grain centres: at the decision frame (the frame after the last one below the threshold
     # in the final direction) and the highest over the run, a block of frames at a time
     Tdec = h.temperature(gx, gy, steps[dec])
@@ -797,7 +803,9 @@ def write_analysis(h, entry, lead, series, Tc=None, thresholds=None):
         want = int(np.sign(pol * h.field_uz))                         # the z direction the field asked for
         r = dict(track=t, bit=b, intended=want, final=round(float(final[i]), 4),
                  peakT=round(float(peak[i]), 1), minM=round(float(minM[i]), 4))
-        if not heated[i]:
+        if empty[i]:
+            r["category"] = "empty"
+        elif not heated[i]:
             r["category"] = "unheated"
         elif abs(final[i]) < SETTLED:
             r["category"] = "undecided"
@@ -811,14 +819,14 @@ def write_analysis(h, entry, lead, series, Tc=None, thresholds=None):
             r.update(decision_frame=d, decision_step=int(steps[d]), Bz_dec=round(bz, 3), B_dec=round(bd, 3),
                      T_dec=round(float(Tdec[i]), 1), m_dec=round(float(m_dec[i]), 4),
                      lag_dec=round(float(hx - gx[i]), 3), dy=round(float(gy[i] - hy), 3))
-        r["correct"] = bool(r["category"] not in ("unheated", "undecided") and want != 0 and sgn[i] == want)
+        r["correct"] = bool(r["category"] not in ("unheated", "undecided", "empty") and want != 0 and sgn[i] == want)
         res.append(r)
     entry["analysis"] = dict(grains=res, thresholds=dict(decision=DECISION, heated=HEATED, settled=SETTLED,
                                                          full_field=FULL_FIELD))
     cats = {}
     for r in res:
         cats[r["category"]] = cats.get(r["category"], 0) + 1
-    written = [r for r in res if r["intended"] != 0 and r["category"] != "unheated"]
+    written = [r for r in res if r["intended"] != 0 and r["category"] not in ("unheated", "empty")]
     log(f"  Tc {Tc or 0:.0f} K, lag {lag:.2f} nm; categories {cats}; correct {sum(r['correct'] for r in res)}"
         f" of {len(written)} heated grains inside the bit windows")
 

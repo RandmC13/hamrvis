@@ -50,7 +50,7 @@ snapshots and a film cut by a geometry file (1.6M atoms).
   approximate.
 - **Grain centres and atom counts come from the atoms** (periodic circular means). `grain-coordinates.txt` counts
   non-magnetic atoms assigned to a grain: in the large run all `fill` atoms belong to grain 0 (48,483 atoms listed,
-  about 19k magnetic), which moved its listed centre 15 nm. Its magnetisation in `grain.txt` is not affected.
+  13,127 magnetic), which moved its listed centre 15 nm. Its magnetisation in `grain.txt` is not affected.
 - **Built-in checks**, stored in the manifest and shown under Run details: (1) every stored column value against
   the exact float64 mean (int8 rounding, <= 1/254); (2) per-grain mean spin of every snapshot against `grain.txt`.
   VAMPIRE writes snapshot k at step `k x rate + 1`, one step after the grain row of the same output, so for a
@@ -64,7 +64,7 @@ snapshots and a film cut by a geometry file (1.6M atoms).
 - **Randomly ordered media.** With `initial-spin-direction = random`, a Monte Carlo relaxation orders each grain up or
   down at random (47 % up in the large run), and every grain starts the write with the sign it ended the relaxation
   with. A saturated start makes writing easy to see; for random media the "m_z vs intended" colour mode shows agreement
-  with the bit each grain sits in, and greys out grains the laser never melts (large run: only 148 of 416 grains, a
+  with the bit each grain sits in, and greys out grains the laser never melts (large run: only 156 of 416 grains, a
   band of about 24 nm, melt in a 58 nm track).
 
 ## Generality
@@ -102,8 +102,9 @@ snapshots and a film cut by a geometry file (1.6M atoms).
   - Tmin))); the whole track if there is no Tc), weighted by the grain-map pixels each grain has in that region
   (pixels ~ atom columns), using the grain magnetisation of the current frame. Without a grain map: grains whose centre
   lies in the region, weighted by atom count. A bit is correct when the sign matches the intended field direction.
-- Large run: 30 of 33 bits correct at the end, against 118 of 148 melted grains; bits hold 3-4 partial grains of
-  either sign, so their mean |m_z| is often small (about 0.1-0.3).
+- Large run: 29 of 31 bits correct at the end (the first bit cell lies off the film once shifted by the lag, and
+  the 33rd bit was never written), against 116 of 142 melted grains inside the bit cells; a cell holds parts of about 9 grains
+  (8-11) of either sign, so its mean |m_z| is well below 1 (median 0.45, 0.15-0.56 for 80 % of the cells).
 
 ## Runs instead of fixed stages
 

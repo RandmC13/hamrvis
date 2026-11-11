@@ -1,8 +1,8 @@
 // hamrvis viewer: loads a bundle made by `hamrvis reduce` (docs/bundle-format.md) and draws it.
 // Data comes from bundle/<path> over HTTP (`hamrvis view`) or from window.HV_EMBED (`hamrvis export`).
 "use strict";
-const HAMRVIS_VERSION = "0.9.0"; // same as hamrvis/__init__.py (a test checks)
-const ANALYSIS_MODEL = "0.9.0";   // first hamrvis version whose write analysis matches the current one (docs/analysis.md)
+const HAMRVIS_VERSION = "0.9.1"; // same as hamrvis/__init__.py (a test checks)
+const ANALYSIS_MODEL = "0.9.1";   // first hamrvis version whose write analysis matches the current one (docs/analysis.md)
 const older = v => !v || v.split(".").map(Number).reduce((c, x, i) => c || x - (+ANALYSIS_MODEL.split(".")[i] || 0), 0) < 0;
 
 // ------------------------------------------------------------------------------------------------ bundle access
@@ -97,11 +97,14 @@ function scoreGrains(e, lag) {
   return e.analysis.grains.map((a, g) => {
     const b = Math.floor((e.grains.x[g] + lag) / p.BL), k = a.track * n + b;
     const intended = Math.sign((b >= 0 && b < n && k < seq.length ? seq[k] : 0) * p.field_uz) || 0;
-    return { ...a, bit: b, intended, correct: a.category !== "unheated" && a.category !== "undecided" && intended !== 0 && Math.sign(a.final) === intended };
+    const scored = a.category !== "unheated" && a.category !== "undecided" && a.category !== "empty";
+    return { ...a, bit: b, intended, correct: scored && intended !== 0 && Math.sign(a.final) === intended };
   });
 }
+// grains the write analysis counts: melted ones (not "unheated", nor "empty": no magnetic atoms)
+const isMelted = a => a.category !== "unheated" && a.category !== "empty";
 // melted grains matching their intended bit (ok of n) and melted grains outside every bit cell (left out)
-const scoreOf = an => { const m = an.filter(a => a.category !== "unheated"), w = m.filter(a => a.intended);
+const scoreOf = an => { const m = an.filter(isMelted), w = m.filter(a => a.intended);
   return { ok: w.filter(a => a.correct).length, n: w.length, out: m.length - w.length }; };
 
 // ------------------------------------------------------------------------------------------------ colour maps
@@ -247,11 +250,11 @@ function minGrainM(d, g) {
 }
 // written as intended at frame f: melted at some point in the run, and pointing along its bit's field now
 const okAt = (d, f, a, g) => a.intended !== 0 && Math.sign(gmz(d, f, g)) === a.intended;
-const melted = a => a.category !== "unheated" && a.intended !== 0;
+const melted = a => isMelted(a) && a.intended !== 0;
 const refD = d => d.e.ref ? D[d.e.ref] : null;                    // the write before this run, if any
 const wantOf = (d, g) => {                                        // intended z direction of grain g (write analysis);
   const an = d.an || (refD(d) && refD(d).an);                     // 0 for grains the laser never melts
-  return an && an[g] && an[g].category !== "unheated" ? an[g].intended : 0;
+  return an && an[g] && isMelted(an[g]) ? an[g].intended : 0;
 };
 // the lag in use for a write run W (entry) and where it comes from
 function lagOf(W) {
@@ -659,8 +662,8 @@ function filmTip(x, y) {
   }
   return kv(rows);
 }
-const CAT = { "full-field": "full field", "reversal": "field reversal", "zero-field": "field off", "unheated": "not melted", "undecided": "undecided" };
-const outcome = a => a.category === "unheated" || a.category === "undecided" || !a.intended ? CAT[a.category]
+const CAT = { "full-field": "full field", "reversal": "field reversal", "zero-field": "field off", "unheated": "not melted", "undecided": "undecided", "empty": "no magnetic atoms" };
+const outcome = a => !isMelted(a) || a.category === "undecided" || !a.intended ? CAT[a.category]
   : `${a.correct ? "✓" : "✗"} ${CAT[a.category]}`;
 
 // ---- cross-section lane (x–z through the section line, from the per-layer volume)
@@ -1050,7 +1053,7 @@ function stResampled(d, rows, pw, ph) {
 function stRows(d) {
   const an = d.an, e = d.e;
   let g = [...Array(d.nG).keys()];
-  if (an && !S.stAll) g = g.filter(i => an[i].category !== "unheated");
+  if (an && !S.stAll) g = g.filter(i => isMelted(an[i]));
   const tr = i => an ? an[i].track : 0;
   return g.sort((a, b) => tr(a) - tr(b) || e.grains.x[a] - e.grains.x[b]);
 }
@@ -1115,7 +1118,7 @@ function drawInspector() {
   if (g < 0) { el.innerHTML = `<h2>${stageTitle(S.stage)}</h2>` + kv(stageFacts(S.stage)) + (d.model ? legendHtml() : ""); return; }
   const a = d.an && d.an[g];
   let chip = "";
-  if (a) chip = a.category === "unheated" ? `<span class="chip none">not melted</span>` : a.category === "undecided" ? `<span class="chip none">undecided</span>`
+  if (a) chip = !isMelted(a) ? `<span class="chip none">${CAT[a.category]}</span>` : a.category === "undecided" ? `<span class="chip none">undecided</span>`
     : !a.intended ? `<span class="chip none">outside bits</span>` : a.correct ? `<span class="chip ok">✓ intended</span>` : `<span class="chip bad">✗ wrong</span>`;
   const rows = [["x, y", `${fmt(e.grains.x[g])}, ${fmt(e.grains.y[g])} nm`],
     ["magnetic atoms", (e.grains.magnetic_atoms || e.grains.atoms)[g].toLocaleString()]];
@@ -1269,7 +1272,7 @@ function drawAnalysis() {
         <div class="figkey"><span><i style="background:var(--ok)"></i>✓</span><span><i style="background:var(--bad)"></i>✗</span><span><i class="line"></i>${fmt(e.Tc, 0)} K isotherm</span></div></div>
       <div class="fig"><h3>Outcome by field at decision</h3><div class="tablewrap"><table>
         <thead><tr><th>Field at decision</th><th class="num">Grains</th><th class="num">✓</th></tr></thead><tbody>
-        ${Object.entries(cats).map(([k, v]) => `<tr><td>${CAT[k]}</td><td class="num">${v.n}</td><td class="num">${k === "unheated" || k === "undecided" ? "–" : v.ok}</td></tr>`).join("")}
+        ${Object.entries(cats).map(([k, v]) => `<tr><td>${CAT[k]}</td><td class="num">${v.n}</td><td class="num">${k === "unheated" || k === "undecided" || k === "empty" ? "–" : v.ok}</td></tr>`).join("")}
         </tbody></table></div>
         ${kv([["decided", `m<sub>z</sub>|m| last below ${th.decision} in final direction`], ["melted", `|m| < ${th.heated} and lost direction`],
               ["undecided", `|final m<sub>z</sub>| < ${th.settled}`], ["reversal", `|B| < ${th.full_field} B<sub>peak</sub>`]])}</div>

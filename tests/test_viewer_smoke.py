@@ -138,7 +138,7 @@ class Expected:
             b = math.floor((x + lag) / p["BL"])
             k = a["track"] * p["bits_per_track"] + b
             want = int(np.sign((p["sequence"][k] if 0 <= b < p["bits_per_track"] and k < len(p["sequence"]) else 0) * p["field_uz"]))
-            if a["category"] != "unheated" and want:
+            if a["category"] not in ("unheated", "empty") and want:
                 n += 1
                 ok += a["category"] != "undecided" and np.sign(a["final"]) == want
         return ok, n

@@ -253,7 +253,7 @@ class Reduce(unittest.TestCase):
         a = self.man["runs"][0]["analysis"]["grains"]
         self.assertEqual(len(a), 9)
         cats = {g["category"] for g in a}
-        self.assertTrue(cats <= {"full-field", "reversal", "zero-field", "unheated", "undecided"})
+        self.assertTrue(cats <= {"full-field", "reversal", "zero-field", "unheated", "undecided", "empty"})
         for g in a:
             if g["category"] in ("full-field", "reversal", "zero-field"):
                 self.assertIn("decision_step", g)
@@ -668,6 +668,51 @@ class Parsing(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "out"))
         reduce.reduce_dipole(d, os.path.join(self.tmp, "out"), e)
         self.assertEqual(e["dipole"], dict(nx=13, ny=7, nz=2, cell_nm=1.0))
+
+
+class EmptyGrains(unittest.TestCase):
+    """A grain with no magnetic atoms: VAMPIRE writes 0 for it in grain.txt, which must not read as a melted grain."""
+
+    def reduce_with_empty_grain(self, tmp, g, keep_coordinates):
+        d = copy_run(os.path.join(SCEN, "write-only", "write"), os.path.join(tmp, "write"))
+        lines = open(os.path.join(d, "grain.txt")).read().splitlines()
+        rows = [l.split() if l.strip() and not l.startswith("#") else None for l in lines]
+        for r in rows:
+            if r:
+                r[1 + 4 * g:5 + 4 * g] = ["0"] * 4          # one lead column (time), then mx my mz |m| per grain
+        open(os.path.join(d, "grain.txt"), "w").write("\n".join(" ".join(r) if r else l for r, l in zip(rows, lines)) + "\n")
+        if keep_coordinates:                                # the grain's atoms get an ID of no listed grain
+            path = os.path.join(d, "atoms-coords.data")
+            n = int(np.fromfile(path, np.uint64, 1)[0])
+            ids = np.memmap(path, np.int32, "r+", offset=8 + 32 * n, shape=(n,))
+            ids[ids == g] = 99
+            ids.flush()
+        else:                                               # no coordinate files: |m| = 0 throughout marks it
+            for f in os.listdir(d):
+                if f.startswith(("atoms-coords", "spins-")):
+                    os.remove(os.path.join(d, f))
+        reduce.reduce([d], os.path.join(tmp, "b"), workers=1)
+        return json.load(open(os.path.join(tmp, "b", "manifest.json")))["runs"][0]
+
+    def test_empty_grain_is_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reduce.reduce([os.path.join(SCEN, "write-only")], os.path.join(tmp, "ref"), workers=1)
+            ref = json.load(open(os.path.join(tmp, "ref", "manifest.json")))["runs"][0]
+        a = ref["analysis"]["grains"]
+        g = 1
+        self.assertEqual((a[g]["category"], a[g]["correct"]), ("full-field", True))   # melted and scored before
+        for keep in (True, False):
+            with self.subTest(coordinates=keep), tempfile.TemporaryDirectory() as tmp:
+                e = self.reduce_with_empty_grain(tmp, g, keep)
+                if keep:
+                    self.assertEqual(e["grains"]["magnetic_atoms"][g], 0)
+                b = e["analysis"]["grains"]
+                self.assertEqual((b[g]["category"], b[g]["correct"]), ("empty", False))
+                melted = lambda an: [r for r in an if r["category"] not in ("unheated", "empty") and r["intended"]]
+                self.assertEqual(len(melted(b)), len(melted(a)) - 1)
+                self.assertEqual([r["correct"] for k, r in enumerate(b) if k != g], [r["correct"] for k, r in enumerate(a) if k != g])
+                if shutil.which("node"):                    # the viewer's scoring agrees
+                    self.assertEqual(viewer_scores(e, e["freeze_lag_nm"]), [[r["bit"], r["intended"], r["correct"]] for r in b])
 
 
 class ReduceOptions(unittest.TestCase):
