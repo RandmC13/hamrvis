@@ -160,6 +160,114 @@ def column_means(xyz, s, pitch_A, nx, ny, factor=1, sites=None):
     return out
 
 
+
+def grain_ids(run):
+    """int32 grain ID of every atom, data files in meta order (binary files hold them after the coordinates in newer
+    VAMPIRE versions, text files in column 6), or None if the files have none."""
+    out = []
+    for p in _data_files(os.path.join(run, "atoms-coords.meta")):
+        if _binary(p):
+            raw = open(p, "rb").read()
+            n = int(np.frombuffer(raw[:8], np.uint64)[0])
+            if len(raw) < 8 + 36 * n:
+                return None
+            out.append(np.frombuffer(raw[8 + 32 * n:8 + 36 * n], np.int32))
+        else:
+            rows = [l.split() for l in open(p).read().split("\n")[1:] if l.strip()]
+            if len(rows[0]) < 6:
+                return None
+            out.append(np.array([int(r[5]) for r in rows]))
+    return np.concatenate(out)
+
+
+def magnetic_materials(run):
+    """0-based indices of the magnetic materials: every material[n] of the input's material file without
+    material[n]:non-magnetic (src/material); None without a material file (then every material counts)."""
+    name = parse_input(input_path(run)).get("material:file", ("", ""))[0]
+    path = os.path.join(run, name)
+    if not name or not os.path.isfile(path):
+        return None
+    keys = parse_input(path)
+    mats = {int(re.match(r"material\[(\d+)\]", k).group(1)) for k in keys if re.match(r"material\[\d+\]", k)}
+    off = {int(re.match(r"material\[(\d+)\]", k).group(1)) for k in keys if re.match(r"material\[\d+\]:non-magnetic$", k)}
+    return sorted(m - 1 for m in range(1, max(mats) + 1) if m not in off) if mats else None
+
+
+def snapshot_list(run):
+    """[(index, time in s, window)] of the spin snapshots named spins-NNNNNNNN.meta, in index order; window is True for
+    a snapshot that holds only the atoms changed since the one before (hamr:active-window, 'Spin data: window')."""
+    out = []
+    for f in sorted(os.listdir(run)):
+        m = re.fullmatch(r"spins-(\d{8})\.meta", f)
+        if m:
+            text = open(os.path.join(run, f)).read()
+            t = float(re.search(r"^Time:\s*(\S+)", text, re.M).group(1))
+            w = re.search(r"^Spin data:\s*(\S+)", text, re.M)
+            out.append((int(m.group(1)), t, bool(w and w.group(1) == "window")))
+    return out
+
+
+def spin_states(run, wanted=None):
+    """Yield (index, float64 [atoms, 3]) for every snapshot in wanted (default all), in order. A window snapshot data
+    file is u64 atoms, u64 ranges, ranges x (first position, count) as u64, then the spins of those positions (f64 x 3);
+    it changes the spins of the snapshot before it, file by file. The yielded array is updated in place."""
+    state = None
+    for index, _, window in snapshot_list(run):
+        files = _data_files(os.path.join(run, f"spins-{index:08d}.meta"))
+        if not window:
+            state = []
+            for p in files:
+                if _binary(p):
+                    raw = open(p, "rb").read()
+                    n = int(np.frombuffer(raw[:8], np.uint64)[0])
+                    state.append(np.frombuffer(raw[8:8 + 24 * n], np.float64).reshape(n, 3).copy())
+                else:
+                    lines = open(p).read().split("\n")[1:]
+                    state.append(np.array([[float(c) for c in l.split()] for l in lines if l.strip()]))
+        else:
+            assert state is not None, f"window snapshot {index} with no complete one before it"
+            for s, p in zip(state, files):
+                raw = open(p, "rb").read()
+                n, r = (int(v) for v in np.frombuffer(raw[:16], np.uint64))
+                assert n == len(s), (p, n, len(s))
+                rng = np.frombuffer(raw[16:16 + 16 * r], np.uint64).reshape(r, 2)
+                vals = np.frombuffer(raw[16 + 16 * r:], np.float64).reshape(-1, 3)
+                k = 0
+                for first, count in rng:
+                    s[int(first):int(first) + int(count)] = vals[k:k + int(count)]
+                    k += int(count)
+                assert k == len(vals), p
+        if wanted is None or index in wanted:
+            yield index, np.concatenate(state) if len(state) > 1 else state[0]
+
+
+def grain_list(run):
+    """float64 [grains, 5] of grain-coordinates.txt: id, x, y (A), atoms, moment."""
+    rows = [l.split() for l in open(os.path.join(run, "grain-coordinates.txt")) if l.strip() and not l.startswith("#")]
+    return np.array([[float(v) for v in r[:5]] for r in rows])
+
+
+def dipole_cells(run):
+    """float64 [cells, 9] of dipole-field.txt: id, atoms, x, y, z (A), moment, Bx, By, Bz (T)."""
+    rows = [l.split() for l in open(os.path.join(run, "dipole-field.txt")) if l.strip() and not l.startswith("#")]
+    return np.array([[float(v) for v in r[:9]] for r in rows])
+
+
+def layer_means(xyz, s, pitch_A, pitch_z_A, z0_A, nz, vx, vy, factor, sites):
+    """[3, nz, vy, vx] mean spin per atomic layer on cells of factor x factor sites (NaN: no atom)."""
+    sx, sy = sites
+    ix = np.rint(xyz[:, 0] / pitch_A).astype(np.int64) % sx // factor
+    iy = np.rint(xyz[:, 1] / pitch_A).astype(np.int64) % sy // factor
+    iz = np.clip(np.rint((xyz[:, 2] - z0_A) / pitch_z_A).astype(np.int64), 0, nz - 1)
+    k = (iz * vy + iy) * vx + ix
+    count = np.bincount(k, minlength=nz * vy * vx)
+    out = np.full((3, nz, vy, vx), np.nan)
+    for c in range(3):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            m = np.bincount(k, s[:, c], minlength=nz * vy * vx) / count
+        out[c] = np.where(count > 0, m, np.nan).reshape(nz, vy, vx)
+    return out
+
 class Head:
     """The HAMR head at a step, from the head parameters of a bundle (themselves checked against the input by
     test_head_parameters_in_any_units), written from the definitions in docs/analysis.md and src/hamr/hamr_continuous.cpp:
