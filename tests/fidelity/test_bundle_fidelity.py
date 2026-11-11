@@ -113,6 +113,7 @@ class BundleAgainstRawFiles(unittest.TestCase):
         v = json.load(open(os.path.join(b, "manifest.json")))["verify"]
         self.assertEqual((st, v["runs"], v["every"]), (0, ["write"], 2))
         self.assertEqual(self.verify(b, "--run", "nosuchrun")[0], 2)
+        self.assertEqual(self.verify(os.path.join(self.tmp, "no-such-bundle"))[0], 2)
 
     def test_verify_fails_on_a_changed_bundle(self):
         b = os.path.join(self.tmp, "changed-output")

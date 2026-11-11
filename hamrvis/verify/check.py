@@ -282,6 +282,9 @@ def add_arguments(ap):
 def verify(bundle, runs=None, every=1, json_path=None):
     """Check the bundle, store the result in its manifest and return the exit status (0 ok, 1 differences, 2 no raw files)."""
     mp = os.path.join(bundle, "manifest.json")
+    if not os.path.isfile(mp):
+        print(f"{bundle} is not a hamrvis bundle: it has no manifest.json")
+        return 2
     man = json.load(open(mp, encoding="utf-8"))
     todo = [e for e in man["runs"] if not runs or e["id"] in runs]
     if runs and len(todo) != len(set(runs)):
