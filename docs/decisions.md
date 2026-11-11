@@ -202,14 +202,14 @@ Measured on a generated run (`tests/make_large.py`, 2000 x 60 nm, 99.84M atoms i
 - `tests/test_hamrvis.py`: field model vs VAMPIRE's B_applied, default 2 T peak, column averages vs a direct numpy
   computation, analysis output, export, and the viewer's JavaScript model vs the Python one (node).
 - `tests/test_viewer_smoke.py`: every scenario in a real browser through Playwright.
-- `tests/fidelity/`: every array and number of a bundle against the raw files, read by an independent reader
-  (`reference.py`, sharing no code with hamrvis): grain series, grain list and centres, grain map, columns and layers of
+- `hamrvis/verify/` (tests in `tests/fidelity/`): every array and number of a bundle against the raw files, read by an
+  independent reader (`reference.py`, sharing no code with the rest of hamrvis; a test keeps its imports so): grain series, grain list and centres, grain map, columns and layers of
   every snapshot (window snapshots rebuilt), counts, lowest |m|, dipole cells, output table, head parameters
-  (`bundle_check.py`, tolerances in its header). The same check runs on real runs next to their files:
-  `python3 tests/fidelity/bundle_check.py <bundle>`.
+  (`check.py`, tolerances in its header). The same check runs on real runs next to their files: `hamrvis verify
+  <bundle>`, which stores its result in the manifest for the viewer (`tests/fidelity/bundle_check.py` still works).
 - `tests/test_viewer_readouts.py`: what the page prints and plots (clock, film, bits and stray field tooltips, scrubber,
   life story, space-time, score against lag, read-back waveform) at several frames of every run, against values worked
-  out from the bundle and an independent head model (`tests/fidelity/reference.py`); printed numbers to the digits shown.
+  out from the bundle and an independent head model (`hamrvis/verify/reference.py`); printed numbers to the digits shown.
 - `tests/test_viewer_pixels.py`: sampled pixels of every view and colour mode decoded through the colour map against the
   data under them (one screen pixel of placement, one colour entry), the stray field map against the bilinear blend of
   its cells, and the selected grain's outline against its grain-map boundary.

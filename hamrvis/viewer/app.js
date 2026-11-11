@@ -637,6 +637,7 @@ function snapLabel(d, s) {
   return `snapshot ${timeText(d, s.time)}` + (dt > 1e-13 ? ` (Δ ${fmt(dt * 1e12, 0)} ps)` : "");
 }
 
+const minmLabel = d => `lowest column |m| over ${d.snaps.length} snapshot${d.snaps.length > 1 ? "s" : ""}`;
 function filmTip(x, y) {
   const d = cur(), e = d.e, g = grainAt(x, y);
   S.hov = g;
@@ -647,7 +648,7 @@ function filmTip(x, y) {
     if (a && ix >= 0 && ix < G.nx && iy >= 0 && iy < G.ny) {
       const v = snapVal(a, 2 * G.nx * G.ny + iy * G.nx + ix);
       rows.push([mk("column m<sub>z</sub>", "r"), v !== v ? "–" : fmt(v, 2)], [mk("atoms in column", "r"), d.topCount[iy * G.nx + ix]],
-                [mk("lowest column |m|", "r"), fmt(d.minm[iy * G.nx + ix] / 255, 2)]);
+                [mk(minmLabel(d), "r"), fmt(d.minm[iy * G.nx + ix] / 255, 2)]);
     }
   }
   if (d.model) rows.push([mk("laser T now", "c"), `${fmt(d.model.T(x, y, d.steps[S.f]), 0)} K`], [mk("peak laser T", "c"), `${fmt(d.model.peakT(x, y), 0)} K`]);
@@ -1244,6 +1245,9 @@ function drawStory(d, g, a) {
 }
 
 // ------------------------------------------------------------------------------------------------ sections
+// true when every bit of each track differs from the one before it: the lag scan then peaks about every 2 BL
+const alternates = p => p.bits_per_track > 1 && p.sequence.length >= p.n_tracks * p.bits_per_track && Array.from({ length: p.n_tracks }, (_, t) => t).every(t =>
+  Array.from({ length: p.bits_per_track - 1 }, (_, b) => p.sequence[t * p.bits_per_track + b + 1] !== p.sequence[t * p.bits_per_track + b]).every(Boolean));
 function drawAnalysis() {
   const sec = $("analysis"), d = cur(), e = d.e;
   if (!e.analysis) { sec.hidden = true; return; }
@@ -1251,6 +1255,7 @@ function drawAnalysis() {
   const an = d.an, sc = scoreOf(an), L = lagOf(e), p = e.hamr;
   const cats = {}; an.forEach(a => { const k = a.category; cats[k] = cats[k] || { n: 0, ok: 0 }; cats[k].n++; if (a.correct) cats[k].ok++; });
   const th = e.analysis.thresholds, given = tcKind(e) !== "inferred";
+  const nOut = an.filter(a => a.decision_step != null && a.Bz_dec === 0 && a.B_dec !== 0).length;   // same test as the inspector's "outside the field box"
   const how = given ? `Tc was given with <code>--tc</code> when the run was reduced, so it is not inferred from the data.`
     : `Tc is the median laser temperature at the grain centre at the decision moment of ${e.Tc_n != null ? e.Tc_n : "the"} settled melted grains decided under the laser
        (decision: the frame after the last one with m<sub>z</sub>|m| below ${th.decision} in the final direction). It is an effective value for this head speed, not the Curie temperature.`;
@@ -1277,15 +1282,19 @@ function drawAnalysis() {
       One lag is used across the whole track, although grains off the track centre freeze closer to the laser centre (the isotherm is an ellipse): a limit of this model.</p>
     <div class="figs">
       <div class="fig"><h3>Score against lag</h3><svg id="lagscan" role="img" aria-label="Melted grains matching their intended bit against the freeze lag"></svg>
-        <div class="figkey"><span><i class="line solid"></i>lag in use</span><span><i class="line"></i>${given ? "from --tc" : "inferred"}</span></div></div>
+        <div class="figkey"><span><i class="line solid"></i>lag in use</span><span><i class="line"></i>${given ? "from --tc" : "inferred"}</span></div>
+        <p class="how">The score peaks again roughly whenever the lag shifts the bit cells by a whole period of the written sequence${alternates(p) ? ` (here about every 2 BL = ${fmt(2 * p.BL, 2)} nm: the sequence alternates)` : ""},
+          so a custom or bit-centre lag can land on a later peak; the physical one is the peak nearest the inferred lag.</p></div>
       <div class="fig"><h3>Decision positions</h3><svg id="scatter" role="img" aria-label="Decision positions"></svg>
         <div class="figkey"><span><i style="background:var(--ok)"></i>✓</span><span><i style="background:var(--bad)"></i>✗</span><span><i class="line"></i>${fmt(e.Tc, 0)} K isotherm</span></div></div>
       <div class="fig"><h3>Outcome by field at decision</h3><div class="tablewrap"><table>
-        <thead><tr><th>Field at decision</th><th class="num">Grains</th><th class="num">✓</th></tr></thead><tbody>
+        <thead><tr><th>Head field at decision</th><th class="num">Grains</th><th class="num">✓</th></tr></thead><tbody>
         ${Object.entries(cats).map(([k, v]) => `<tr><td>${CAT[k]}</td><td class="num">${v.n}</td><td class="num">${k === "unheated" || k === "undecided" || k === "empty" ? "–" : v.ok}</td></tr>`).join("")}
         </tbody></table></div>
         ${kv([["decided", `m<sub>z</sub>|m| last below ${th.decision} in final direction`], ["melted", `|m| < ${th.heated} and lost direction`],
-              ["undecided", `|final m<sub>z</sub>| < ${th.settled}`], ["reversal", `|B| < ${th.full_field} B<sub>peak</sub>`]])}</div>
+              ["undecided", `|final m<sub>z</sub>| < ${th.settled}`], ["reversal", `|B| < ${th.full_field} B<sub>peak</sub>`]])}
+        <p class="how">Grains are counted by the head field at their decision moment, not the field at the grain: a grain decided outside the field box counts
+          by the head field although no field reached it${nOut ? ` (${nOut} grain${nOut > 1 ? "s" : ""} here; the inspector marks them)` : ""}.</p></div>
     </div>
     <p class="how">${markKey}</p>`;
   sec.querySelectorAll('input[name="lag"]').forEach(r => r.onchange = () => { S.lag.mode = r.value; applyLag(); });
@@ -1341,9 +1350,16 @@ function drawScatter(d, an) {
     c.addEventListener("click", () => { S.sel = g; S.ysec = e.grains.y[g]; if (a.decision_step != null) seek(frameAt(d, a.decision_step)); window.scrollTo({ top: 0, behavior: "smooth" }); });
   }
 }
+// what 'hamrvis verify' stored in the manifest, for run id
+function verifyText(v, id) {
+  if (!v || (v.runs && !v.runs.includes(id))) return "not verified (run <code>hamrvis verify</code> on the bundle next to its run directories)";
+  const part = [v.runs && `runs ${v.runs.join(", ")} only`, v.every > 1 && `every ${v.every}th snapshot`].filter(Boolean).join(", ");
+  return `${v.failed ? `<b>${v.failed} of ${v.checks} checks differ</b>` : `${v.checks} checks, 0 differ`}, ${v.date} with hamrvis ${v.hamrvis_version}${part ? ` (${part})` : ""}`;
+}
 function drawDetails() {
   const e = cur().e, sec = $("details"), ck = e.checks;
   const facts = [["source", e.source], ["reduced", `${S.M.created} with hamrvis ${S.M.hamrvis_version || "older than 0.9"}`], ["viewer", `hamrvis ${HAMRVIS_VERSION}`]];
+  facts.push(["checked against raw files", verifyText(S.M.verify, e.id)]);
   const from = e.grain_map && (e.grain_map.from_run || e.grain_map.from_stage);
   if (e.segments && e.segments.length > 1) facts.splice(1, 0, ["continued in", e.segments.slice(1).join(", ")]);
   if (older(S.M.hamrvis_version) && S.M.runs.some(r => r.analysis)) facts.push(["warning", `reduced before the current analysis model (hamrvis ${ANALYSIS_MODEL}): reduce again for current write analysis numbers`]);

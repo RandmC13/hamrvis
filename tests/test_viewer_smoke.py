@@ -30,6 +30,9 @@ class ViewerSmoke(unittest.TestCase):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 out = os.path.join(tmp, "bundle")
                 reduce.reduce([os.path.join(SCEN, name)], out, workers=1)
+                checked = name == "chain"
+                if checked:          # the Run details row shows what hamrvis verify stored
+                    subprocess.run([sys.executable, "-m", "hamrvis", "verify", out], cwd=ROOT, check=True, capture_output=True)
                 runs = [r["id"] for r in json.load(open(os.path.join(out, "manifest.json")))["runs"]]
                 with socket.socket() as s:
                     s.bind(("127.0.0.1", 0))
@@ -46,6 +49,8 @@ class ViewerSmoke(unittest.TestCase):
                             time.sleep(0.1)
                     r = subprocess.run(["node", "viewer_smoke.js", url] + runs, cwd=HERE, capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    want = "checks, 0 differ" if checked else "not verified"
+                    self.assertEqual(r.stdout.count(want), len(runs), r.stdout)
                 finally:
                     view.kill()
                     view.wait()

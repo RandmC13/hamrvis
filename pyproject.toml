@@ -16,7 +16,7 @@ dynamic = ["version"]
 hamrvis = "hamrvis.__main__:main"
 
 [tool.setuptools]
-packages = ["hamrvis"]
+packages = ["hamrvis", "hamrvis.verify"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hamrvis.__version__" }

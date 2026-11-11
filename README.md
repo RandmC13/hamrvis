@@ -88,6 +88,9 @@ a clone of this repository:
 sbatch --account=<project> scripts/slurm-reduce.job my-runs/ ~/scratch/bundles/my-bundle
 ```
 
+To check the bundle against the raw files before you copy it, run `hamrvis verify ~/scratch/bundles/my-bundle` on the
+cluster (15 s for a bundle with one snapshot of 8.7 million atoms).
+
 If your cluster needs a module for Python and numpy, set it with `PY_MODULE=<module>` when you submit. If the job
 runs out of time, submit the same command again and it carries on from where it stopped.
 
@@ -129,6 +132,8 @@ hamrvis separates what VAMPIRE recorded from what it works out itself:
   stored values against the exact means and against `grain.txt`, and shows the result under Run details.
 - The head position, laser temperature and field are rebuilt from your input using VAMPIRE's formulas, and checked
   against VAMPIRE's `B_applied` column and logged head positions when you reduce.
+- `hamrvis verify my-bundle`, run where the raw files are, checks every array and number of the bundle against them
+  with a separate reader that shares no code with the rest of hamrvis. Run details shows its result, or "not verified".
 - The write analysis is hamrvis's own interpretation, including the freezing temperature, the freeze lag and which
   grains count as written correctly. [docs/analysis.md](docs/analysis.md) gives the definitions.
 

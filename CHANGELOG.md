@@ -2,6 +2,18 @@
 
 ## 0.9.1 (unreleased)
 
+Added:
+
+- `hamrvis verify <bundle>` checks every array and number of a bundle against the raw run files with an independent
+  reader (formerly `tests/fidelity/bundle_check.py`, which still works), stores the result in the manifest and the
+  viewer shows it under Run details.
+
+Changed:
+
+- Viewer: the score-against-lag chart says the score peaks again about every period of the bit sequence, the outcome
+  table names the head field at the decision and counts grains decided outside the field box, and the lowest column
+  |m| readout gives the number of snapshots it covers.
+
 Fixed:
 
 - A grain with no magnetic atoms (a non-magnetic layer VAMPIRE gives a grain ID, for which `grain.txt` holds 0) is no

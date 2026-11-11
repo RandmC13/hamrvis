@@ -1,9 +1,12 @@
 """Bundle layer of the data fidelity checks on the test scenarios: every array and manifest number of their bundles
-against the raw files, by tests/fidelity/bundle_check.py (which compares them with tests/fidelity/reference.py, an
+against the raw files, by hamrvis/verify/check.py (which compares them with hamrvis/verify/reference.py, an
 independent reader of VAMPIRE's files; the tolerances are listed there). The same checks run on a bundle of real runs
-with: python3 tests/fidelity/bundle_check.py <bundle>
+with: hamrvis verify <bundle>
 Run: python3 -m unittest discover tests  (from the repository root)
 """
+import ast
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -14,7 +17,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
-import bundle_check                                      # noqa: E402  (independent of hamrvis)
+from hamrvis.verify import check as bundle_check         # noqa: E402  (independent of the rest of hamrvis)
 import test_hamrvis                                      # noqa: E402  (its window snapshot series; module only, so its tests are not collected here)
 from hamrvis import reduce                               # noqa: E402  (only to make the bundles)
 
@@ -88,6 +91,65 @@ class BundleAgainstRawFiles(unittest.TestCase):
         res = bundle_check.Results()
         bundle_check.check_run(b, e, res)
         self.assertEqual([r[1].split(" (")[0] for r in res.failed()], ["snapshot columns"])
+
+
+    def verify(self, b, *args):
+        """hamrvis verify on bundle b; returns (exit status, printed text)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            st = bundle_check.main([b, *args])
+        return st, out.getvalue()
+
+    def test_verify_stores_its_result(self):
+        b = os.path.join(self.tmp, "verified")
+        shutil.copytree(self.bundles["chain"], b)
+        st, txt = self.verify(b)
+        v = json.load(open(os.path.join(b, "manifest.json")))["verify"]
+        self.assertEqual(st, 0, txt)
+        self.assertEqual((v["failed"], v["every"], v["runs"]), (0, 1, None))
+        self.assertGreater(v["checks"], 20)
+        self.assertIn(f"{v['checks']} checks, 0 failed", txt)
+        st, _ = self.verify(b, "--run", "write", "--every", "2")
+        v = json.load(open(os.path.join(b, "manifest.json")))["verify"]
+        self.assertEqual((st, v["runs"], v["every"]), (0, ["write"], 2))
+        self.assertEqual(self.verify(b, "--run", "nosuchrun")[0], 2)
+
+    def test_verify_fails_on_a_changed_bundle(self):
+        b = os.path.join(self.tmp, "changed-output")
+        shutil.copytree(self.bundles["chain"], b)
+        f = os.path.join(b, "write", "output.f64")
+        raw = bytearray(open(f, "rb").read())
+        raw[-1] ^= 0x01                                   # last bit of the last value's float64
+        open(f, "wb").write(bytes(raw))
+        st, txt = self.verify(b, "--run", "write")
+        self.assertEqual(st, 1, txt)
+        self.assertEqual(json.load(open(os.path.join(b, "manifest.json")))["verify"]["failed"], 1)
+
+    def test_verify_says_when_the_runs_are_missing(self):
+        b = os.path.join(self.tmp, "moved")
+        shutil.copytree(self.bundles["chain"], b)
+        mp = os.path.join(b, "manifest.json")
+        man = json.load(open(mp))
+        man["runs"][0]["segments"] = ["/nonexistent/run"]
+        json.dump(man, open(mp, "w"))
+        st, txt = self.verify(b)
+        self.assertEqual(st, 2)
+        self.assertIn("/nonexistent/run", txt)
+        self.assertIn("raw run files", txt)
+        self.assertNotIn("verify", json.load(open(mp)))     # nothing stored without a check
+
+    def test_verify_is_independent_of_hamrvis(self):
+        """hamrvis/verify imports nothing from the rest of hamrvis but its version."""
+        d = os.path.join(os.path.dirname(HERE), "..", "hamrvis", "verify")
+        for f in os.listdir(d):
+            if f.endswith(".py"):
+                for n in ast.walk(ast.parse(open(os.path.join(d, f)).read())):
+                    if isinstance(n, ast.ImportFrom) and n.level:
+                        ok = n.level == 1 or (n.level == 2 and n.module is None and [a.name for a in n.names] == ["__version__"])
+                        self.assertTrue(ok, f"{f}: from {'.' * n.level}{n.module or ''} import {[a.name for a in n.names]}")
+                    if isinstance(n, (ast.Import, ast.ImportFrom)):
+                        mods = [n.module] if isinstance(n, ast.ImportFrom) else [a.name for a in n.names]
+                        self.assertFalse(any(m and m.startswith("hamrvis") for m in mods), f)
 
 
 if __name__ == "__main__":

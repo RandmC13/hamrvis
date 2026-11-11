@@ -1,4 +1,4 @@
-"""hamrvis command line: python3 -m hamrvis {inspect,reduce,view,export} ...  (see README.md)"""
+"""hamrvis command line: python3 -m hamrvis {inspect,reduce,verify,view,export} ...  (see README.md)"""
 import argparse
 
 from . import __version__
@@ -63,6 +63,10 @@ def main():
                     ("settled", "|final m_z|m|| below this = still disordered at the end"),
                     ("full_field", "|B| / peak field at the decision above this = full field, below = reversal")):
         r.add_argument(f"--{k.replace('_', '-')}", type=float, help=f"write analysis: {what} (default {red.THRESHOLDS[k]})")
+    c = sub.add_parser("verify", help="check a bundle against the raw run files it was made from (an independent reader) "
+                                      "and store the result in the bundle, shown by the viewer")
+    from .verify import check
+    check.add_arguments(c)
     v = sub.add_parser("view", help="serve the viewer for a bundle and open it in the browser")
     v.add_argument("bundle", help="bundle directory made by 'reduce'")
     v.add_argument("-p", "--port", type=int, default=8737)
@@ -84,6 +88,10 @@ def main():
     elif a.cmd == "reduce":
         red.reduce(a.runs, a.out, volume=not a.no_volume, every=a.every, Tc=a.tc, workers=a.workers, name=a.name,
                    layer_factor=a.layer_factor, order=a.order, opts=_opts(a))
+    elif a.cmd == "verify":
+        if a.every < 1:
+            raise SystemExit("--every must be 1 or more")
+        raise SystemExit(check.verify(a.bundle, a.run, a.every, a.json))
     elif a.cmd == "export":
         from . import export
         export.export(a.bundle, a.out, a.grain_step, a.snap_step, not a.no_volume, a.limit_mb, a.artifact)

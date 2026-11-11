@@ -1,7 +1,7 @@
 """What the viewer prints and plots equals what the bundle holds: the clock, film tooltips, bits lane and stray field
 tooltips, and the chart series (scrubber, life story, space-time, score against lag, read-back waveform), at several
 frames of every run. Expected values come from the bundle files and the independent head model in
-tests/fidelity/reference.py, never from app.js. Printed numbers must agree within the digits shown, chart values to
+hamrvis/verify/reference.py, never from app.js. Printed numbers must agree within the digits shown, chart values to
 float rounding. Skipped without node and Playwright."""
 import gzip
 import json
@@ -17,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # also when run as tests.<module>
 from test_viewer_smoke import HERE, ROOT, SCEN, Expected, have_playwright, reduce, serve
-from fidelity.reference import Head
+from hamrvis.verify.reference import Head
 
 CAT = {"full-field": "full field", "reversal": "field reversal", "zero-field": "field off", "unheated": "not melted",
        "undecided": "undecided", "empty": "no magnetic atoms"}
@@ -228,7 +228,8 @@ class ViewerReadouts(unittest.TestCase):
             mzc, n, low = R.column(f, x, y)
             want["column mz"] = ("–" if mzc != mzc else mzc)
             want["atoms in column"] = n
-            want["lowest column |m|"] = low
+            ns = len(R.snaps)
+            want[f"lowest column |m| over {ns} snapshot{'s' if ns > 1 else ''}"] = low
         if h:
             want["laser T now"] = h.T(x, y, R.steps[f])
             want["peak laser T"] = h.peak_T(x, y)

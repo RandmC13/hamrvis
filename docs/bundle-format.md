@@ -39,6 +39,7 @@ that still has it is unfinished.
 
 ```
 format: "hamrvis-bundle", version: 2, created, name
+verify               written by hamrvis verify: {hamrvis_version, date, checks, failed, runs (null: all), every}
 runs: [ {                 in run order (the order the runs started), one per tab
    id, title            folder name (unique); tab title from the run type
    type                 hamr | monte-carlo | dipole-read | generic (hamrvis/runs.py TYPES)
