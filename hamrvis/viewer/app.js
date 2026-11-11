@@ -1121,7 +1121,7 @@ function drawInspector() {
     ["magnetic atoms", (e.grains.magnetic_atoms || e.grains.atoms)[g].toLocaleString()]];
   if (d.g) rows.push([mk("m<sub>z</sub>", "r"), fmt(gmz(d, S.f, g), 3)], [mk("|m|", "r"), fmt(gml(d, S.f, g), 3)]);
   if (a) {
-    if (a.intended) rows.push([mk("intended", "i"), `${a.intended > 0 ? "↑ +z" : "↓ −z"} (bit ${a.bit + 1}, ${lagText(e)})`]);
+    if (a.intended) rows.push([mk("intended", "i"), `${a.intended > 0 ? "↑ +z" : "↓ −z"}, bit ${a.bit + 1}`], [mk("freeze lag", "i"), lagText(e).slice(4)]);
     rows.push([mk("final m<sub>z</sub>", "r"), fmt(a.final, 3)]);
     if (a.decision_step != null) rows.push([mk("decided", "i"), timeText(d, a.decision_step * e.dt)], [mk("T then", "c"), `${fmt(a.T_dec, 0)} K`],
       [mk("head B<sub>z</sub> then", "c"), `${sgn(+(a.B_dec * e.hamr.field_uz).toFixed(2))} T (${CAT[a.category]})`],

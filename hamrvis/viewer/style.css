@@ -219,3 +219,4 @@ td.num { text-align: right; }
 .how { margin: 0 0 14px; font-size: 13px; color: var(--muted); max-width: 100ch; }
 sup.src { font-size: 9px; font-weight: 700; color: var(--muted); margin-left: 2px; cursor: help; }
 .figkey i.line.solid { border-top-style: solid; }
+#inspector .facts dd { white-space: nowrap; }   /* values on one line; the labels wrap instead */
