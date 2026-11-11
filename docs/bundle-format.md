@@ -26,8 +26,10 @@ With `--precision 16` the snapshot files are `NNNNNNNN.i16.gz` (int16, x 32767, 
 
 `<run>` is the run's id (its folder name, made unique), one per tab. A run without grains (continuous film) has an
 empty grain list and no grain files; the viewer then steps through its snapshots. Pixels with no magnetic atom (grain boundaries) hold -128 in the int8
-arrays. The first array index of `[3, ...]` arrays is the x, y, z component. Row `iy` of a map is y = (iy + 0.5) x
-pitch from the bottom of the film; the viewer flips it for display.
+arrays. The first array index of `[3, ...]` arrays is the x, y, z component. An atom at x goes to column
+`rint(x / a) // f` (`a`: `atom_pitch_nm`, `f` atoms per pixel, so `pitch_nm = f a`), and likewise in y: column `ix`
+spans `ix pitch - a/2` to `(ix + 1) pitch - a/2`, centred on its atoms, and row `iy` counts from the bottom of the film
+(the viewer flips it for display). Dipole cell `i` spans `i cell` to `(i + 1) cell`.
 
 A series with an overview is read in blocks by HTTP byte ranges (`hamrvis view` answers them); no other part of the
 format depends on its size. While `reduce` runs, a folder `.reduce-work` holds its per-atom indices and progress; a bundle
@@ -48,7 +50,7 @@ runs: [ {                 in run order (the order the runs started), one per tab
    dt                   time step (s); size_nm [x, y, z]; magnetic_types (0-based material indices); n_atoms
    grains               {id, x, y (nm), atoms, magnetic_atoms}; x, y, magnetic_atoms from the atoms when the run
                         wrote coordinates, else from grain-coordinates.txt plus outline: [[x, y] ...] (Voronoi, approximate)
-   grain_map            {nx, ny, pitch_nm, mixed_columns, from_run (if copied from another run)}
+   grain_map            {nx, ny, pitch_nm, atom_pitch_nm, mixed_columns, from_run (if copied from another run)}
    checks               {column_rounding_max, grain_txt_same_step {n, max_diff},
                          grain_txt_one_step_earlier {n, max_diff, median_diff}}
    source_files         {name: [bytes, mtime]} of input, output, grain.txt, dipole-field.txt

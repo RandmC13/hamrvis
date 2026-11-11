@@ -269,12 +269,23 @@ const writeOf = d => d.e.hamr ? d.e : d.e.ref ? S.M.byId[d.e.ref] : null;
 function applyLag() {   // rescore every loaded write and drop what was built from the old lag
   for (const d of Object.values(D)) if (d.an0) { d.an = scoreGrains(d.e, lagOf(d.e).lag); delete d.bitIdx; }
   for (const k in _cells) delete _cells[k];
+  _st = null;                                                     // the space-time image colours against the intended bit
   syncControls(); drawAnalysis(); drawDetails(); redraw();
 }
+// Pixel geometry along one axis: pixel i spans o + i p to o + (i + 1) p (nm). The reducer puts an atom at x in column
+// rint(x / a) // f (a: atom spacing, f atoms per pixel), so atom grids start half an atom spacing below 0 (aGeo);
+// dipole cells start at 0 (cGeo).
+const atomPitch = d => (d.grid && d.grid.atom_pitch_nm) || (d.e.grain_map && (d.e.grain_map.atom_pitch_nm || d.e.grain_map.pitch_nm)) || 0;
+const aGeo = (d, pitch) => ({ p: pitch, o: -atomPitch(d) / 2 });
+const cGeo = (P, axis) => ({ p: cellNm(P, axis), o: 0 });
+const pixOf = (g, v) => Math.floor((v - g.o) / g.p);
+// centre of pixel i of pitch P: the mean of its atom columns k = i f ... i f + f - 1 at x = k a, written as the atoms'
+// own positions so that a column exactly on a bit boundary falls on the same side as in the analysis
+const pixC = (d, P) => { const a = atomPitch(d) || P, f = Math.round(P / a); return i => a * (i * f + (f - 1) / 2); };
 function grainAt(x, y) {                                          // grain index at film position, from the atom map
   const d = cur(), M = d.e.grain_map;
   if (!M) return d.e.grains.outline ? d.e.grains.outline.findIndex(o => o && inPoly(o, x, y)) : -1;
-  const ix = Math.floor(x / M.pitch_nm), iy = Math.floor(y / M.pitch_nm);
+  const gg = aGeo(d, M.pitch_nm), ix = pixOf(gg, x), iy = pixOf(gg, y);
   return ix >= 0 && ix < M.nx && iy >= 0 && iy < M.ny ? d.gmap[iy * M.nx + ix] : -1;
 }
 function inPoly(o, x, y) {
@@ -327,12 +338,12 @@ function pixImage(nx, ny, colour) {
   x.putImageData(im, 0, 0); return c;
 }
 
-// The part of an nx x ny grid (spanning the film in x) inside the x window and the rows fy0..fy1 (fractions), at no more
-// than twice the screen resolution: canvases stay within the browser's limits on any film.
-function gridImage(nx, ny, colour, fy0, fy1, w, h) {
-  const L = Lx(), r = dpr();
-  const ix0 = Math.max(0, Math.floor(S.win.x0 / L * nx)), ix1 = Math.min(nx, Math.ceil(S.win.x1 / L * nx));
-  const iy0 = Math.max(0, Math.floor(fy0 * ny)), iy1 = Math.min(ny, Math.ceil(fy1 * ny));
+// The part of an nx x ny grid inside the x window and between ylo and yhi (nm along gy), at no more than twice the
+// screen resolution: canvases stay within the browser's limits on any film. gx, gy: pixel geometry (aGeo, cGeo).
+function gridImage(nx, ny, colour, gx, gy, ylo, yhi, w, h) {
+  const r = dpr();
+  const ix0 = Math.max(0, Math.min(nx - 1, pixOf(gx, S.win.x0))), ix1 = Math.max(ix0 + 1, Math.min(nx, Math.ceil((S.win.x1 - gx.o) / gx.p)));
+  const iy0 = Math.max(0, Math.min(ny - 1, pixOf(gy, ylo))), iy1 = Math.max(iy0 + 1, Math.min(ny, Math.ceil((yhi - gy.o) / gy.p)));
   const stepx = Math.max(1, Math.floor((ix1 - ix0) / (2 * w * r))), stepy = Math.max(1, Math.floor((iy1 - iy0) / (2 * h * r)));
   const cw = Math.ceil((ix1 - ix0) / stepx), ch = Math.ceil((iy1 - iy0) / stepy);
   const c = off(cw, ch), x = c.getContext("2d"), im = x.createImageData(cw, ch);
@@ -341,7 +352,7 @@ function gridImage(nx, ny, colour, fy0, fy1, w, h) {
     im.data[o] = col[0]; im.data[o + 1] = col[1]; im.data[o + 2] = col[2]; im.data[o + 3] = 255;
   }
   x.putImageData(im, 0, 0);
-  return { c, x0: ix0 / nx * L, x1: Math.min(ix0 + cw * stepx, nx) / nx * L, fy0: iy0 / ny, fy1: Math.min(iy0 + ch * stepy, ny) / ny, win: S.win };
+  return { c, x0: gx.o + ix0 * gx.p, x1: gx.o + Math.min(ix0 + cw * stepx, nx) * gx.p, y0: gy.o + iy0 * gy.p, y1: gy.o + Math.min(iy0 + ch * stepy, ny) * gy.p };
 }
 // draw a gridImage: x from the window, y from the lane's screen positions of its rows
 function putImage(ctx, im, w, yTop, yBot, smooth = false) {
@@ -378,9 +389,9 @@ function filmScale(w, h) {
   const sy = full ? h / Ly() : sx, y0 = full ? 0 : Math.max(0, Math.min(Ly() - h / sy, S.y0));
   return { sx, sy, y0, y1: full ? Ly() : y0 + h / sy, scrolled: !full, py: y => h - (y - y0) * sy };
 }
-function filmImage(V, nx, ny, colour, w, h, smooth) {
-  const im = gridImage(nx, ny, colour, V.y0 / Ly(), V.y1 / Ly(), w, h);
-  im.top = V.scrolled ? V.py(im.fy1 * Ly()) : 0; im.bot = V.scrolled ? V.py(im.fy0 * Ly()) : h; im.smooth = smooth;
+function filmImage(V, nx, ny, colour, w, h, smooth, gx, gy = gx) {
+  const im = gridImage(nx, ny, colour, gx, gy, V.y0, V.y1, w, h);
+  im.top = V.py(im.y1); im.bot = V.py(im.y0); im.smooth = smooth;
   return im;
 }
 const putFilm = (ctx, im, w) => putImage(ctx, im, w, im.top, im.bot, im.smooth);
@@ -443,7 +454,7 @@ function drawFilm(ctx, w, h) {
   if (view === "grains") {
     if (M) {
       const pal = Array.from({ length: d.nG }, (_, g) => grainColour(d, S.f, g));
-      putFilm(ctx, filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? LUT.void : pal[d.gmap[i]], w, h), w);
+      putFilm(ctx, filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? LUT.void : pal[d.gmap[i]], w, h, false, aGeo(d, M.pitch_nm)), w);
     } else if (e.grains.outline) {   // no atom coordinates in the bundle: VAMPIRE's Voronoi outlines (approximate)
       world();
       e.grains.outline.forEach((o, g) => { if (!o) return; const c = grainColour(d, S.f, g); ctx.fillStyle = `rgb(${c})`; ctx.beginPath();
@@ -466,9 +477,9 @@ function drawFilm(ctx, w, h) {
   // hovered and selected grain outlines, from the atom map
   if (M) for (const [g, col, lw] of [[S.hov, "--muted", 1], [S.sel, "--ink", 1]]) {
     if (g < 0) continue;
-    const cw = fw / M.nx, ch = Ly() * sy / M.ny;
+    const gg = aGeo(d, M.pitch_nm), cw = gg.p * sx, ch = gg.p * sy;
     ctx.fillStyle = css(col); const pw = Math.max(cw * (lw + .2), cw < 1 ? 1 : 0), ph = Math.max(ch * (lw + .2), ch < 1 ? 1 : 0);
-    for (const i of grainEdge(d, g)) ctx.fillRect((i % M.nx) * cw, h - (Math.floor(i / M.nx) + 1) * ch, pw, ph);
+    for (const i of grainEdge(d, g)) ctx.fillRect((gg.o + (i % M.nx) * gg.p) * sx, h - (gg.o + (Math.floor(i / M.nx) + 1) * gg.p) * sy, pw, ph);
   }
   else if (e.grains.outline) for (const [g, col, lw] of [[S.hov, "--muted", 1.2], [S.sel, "--ink", 2]]) {   // Voronoi fallback
     const o = g >= 0 && e.grains.outline[g]; if (!o) continue;
@@ -511,10 +522,10 @@ function cellParts(d) {
     const yc = p.pad + (t + .5) * p.TW, hw = C.half || p.TW / 2, x0 = b * p.BL - C.lag, x1 = x0 + p.BL;
     const w = new Map();
     if (M && d.gmap) {
-      const P = M.pitch_nm;
-      for (let iy = Math.max(0, Math.floor((yc - hw) / P)); iy < Math.min(M.ny, Math.ceil((yc + hw) / P)); iy++)
-        for (let ix = Math.floor(x0 / P); ix < Math.ceil(x1 / P); ix++) {
-          const g = d.gmap[iy * M.nx + ((ix % M.nx) + M.nx) % M.nx]; if (g >= 0) w.set(g, (w.get(g) || 0) + 1);
+      const gg = aGeo(d, M.pitch_nm), cx = pixC(d, M.pitch_nm);
+      for (let iy = Math.max(0, pixOf(gg, yc - hw)); iy < Math.min(M.ny, pixOf(gg, yc + hw) + 1); iy++) if (Math.abs(cx(iy) - yc) <= hw)
+        for (let ix = Math.max(0, pixOf(gg, x0)); ix < Math.min(M.nx, pixOf(gg, x1) + 1); ix++) if (cx(ix) >= x0 && cx(ix) < x1) {
+          const g = d.gmap[iy * M.nx + ix]; if (g >= 0) w.set(g, (w.get(g) || 0) + 1);
         }
     } else e.grains.x.forEach((x, g) => { const y = e.grains.y[g]; if (x >= x0 && x < x1 && Math.abs(y - yc) <= hw) w.set(g, e.grains.atoms[g]); });
     out.push({ t, b, want: Math.sign(p.sequence[t * p.bits_per_track + b] * p.field_uz), parts: [...w] });
@@ -596,9 +607,10 @@ function pixelImage(d, view, V, w, h) {
   const G = d.grid, vc = LUT.void;
   if (S.colour === "peak" && d.model) {
     const p = d.model.p;
-    return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq((d.model.peakT((i % G.nx + .5) * G.pitch_nm, (Math.floor(i / G.nx) + .5) * G.pitch_nm) - p.Tmin) / (p.Tmax - p.Tmin))) : vc, w, h);
+    const gg = aGeo(d, G.pitch_nm), cx = pixC(d, G.pitch_nm);
+    return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq((d.model.peakT(cx(i % G.nx), cx(Math.floor(i / G.nx))) - p.Tmin) / (p.Tmax - p.Tmin))) : vc, w, h, false, gg);
   }
-  if (S.colour === "minm") return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq(1 - d.minm[i] / 255)) : vc, w, h);
+  if (S.colour === "minm") return filmImage(V, G.nx, G.ny, i => d.topCount[i] ? rgbOf(LUT.s, idxSeq(1 - d.minm[i] / 255)) : vc, w, h, false, aGeo(d, G.pitch_nm));
   const s = nearestSnap(d, d.steps[S.f]);
   if (!s) return null;
   const agree = S.colour === "agree" && d.gmap;
@@ -609,11 +621,11 @@ function pixelImage(d, view, V, w, h) {
   };
   if (view === "atoms") {
     const a = snapArray(d, "top", s.index); if (!a) return null;
-    return filmImage(V, G.nx, G.ny, i => col(snapVal(a, 2 * G.nx * G.ny + i), i), w, h);
+    return filmImage(V, G.nx, G.ny, i => col(snapVal(a, 2 * G.nx * G.ny + i), i), w, h, false, aGeo(d, G.pitch_nm));
   }
   const a = snapArray(d, "vol", s.index); if (!a) return null;
   const n = G.vx * G.vy, o = 2 * G.nz * n + S.layer * n, r = lp(G) / G.pitch_nm;
-  return filmImage(V, G.vx, G.vy, i => col(snapVal(a, o + i), Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))), w, h);
+  return filmImage(V, G.vx, G.vy, i => col(snapVal(a, o + i), Math.min(G.ny - 1, Math.floor((Math.floor(i / G.vx) + .5) * r)) * G.nx + Math.min(G.nx - 1, Math.floor((i % G.vx + .5) * r))), w, h, false, aGeo(d, lp(G)));
 }
 const lp = G => G.layer_pitch_nm || 2 * G.pitch_nm;
 function snapLabel(d, s) {
@@ -626,7 +638,7 @@ function filmTip(x, y) {
   S.hov = g;
   const rows = [[`x, y`, `${fmt(x)}, ${fmt(y)} nm`]];
   if (d.snaps && S.view !== "grains") {
-    const G = d.grid, ix = Math.floor(x / G.pitch_nm), iy = Math.floor(y / G.pitch_nm);
+    const G = d.grid, gg = aGeo(d, G.pitch_nm), ix = pixOf(gg, x), iy = pixOf(gg, y);
     const s = nearestSnap(d, d.steps[S.f]), a = s && snapArray(d, "top", s.index);
     if (a && ix >= 0 && ix < G.nx && iy >= 0 && iy < G.ny) {
       const v = snapVal(a, 2 * G.nx * G.ny + iy * G.nx + ix);
@@ -665,14 +677,14 @@ function xzLane() {
         else setNote("xz", [s ? "loading" : "no snapshot"]);
         return;
       }
-      const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, Math.floor(S.ysec / lp(G))));
+      const n = G.vx * G.vy, iy = Math.max(0, Math.min(G.vy - 1, pixOf(aGeo(d, lp(G)), S.ysec)));
       const img = gridImage(G.vx, G.nz, i => { const v = snapVal(a, 2 * G.nz * n + Math.floor(i / G.vx) * n + iy * G.vx + (i % G.vx));
-        return v !== v ? LUT.void : rgbOf(LUT.m, idxDiv(v)); }, 0, 1, w, h);
+        return v !== v ? LUT.void : rgbOf(LUT.m, idxDiv(v)); }, aGeo(d, lp(G)), { p: 1, o: 0 }, 0, G.nz, w, h);
       putImage(ctx, img, w, 0, h);
       this._last = { img, s, st: d.st };
-      setNote("xz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(G.nz * G.pitch_z_nm)} nm, ×${+(h / (G.nz * G.pitch_z_nm) / (w / span())).toFixed(1)}`, snapLabel(d, s)]);
+      setNote("xz", [`y ${fmt(S.ysec)} nm`, `atom layers z ${fmt(G.z0_nm || 0, 2)}–${fmt((G.z0_nm || 0) + (G.nz - 1) * G.pitch_z_nm, 2)} nm, ×${+(h / (G.nz * G.pitch_z_nm) / (w / span())).toFixed(1)}`, snapLabel(d, s)]);
     },
-    hover(x, y, ev, h) { return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((1 - y / h) * cur().grid.nz * cur().grid.pitch_z_nm)} nm`]]); },
+    hover(x, y, ev, h) { const G = cur().grid; return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((G.z0_nm || 0) + ((1 - y / h) * G.nz - .5) * G.pitch_z_nm)} nm`]]); },
     yMode: "px",
   };
 }
@@ -760,9 +772,9 @@ function sensorLane() {
     height: filmH, scroll: true,
     draw(ctx, w, h) {
       const d = cur(), P = d.e.dipole, Bz = dipoleLayer(d, S.z), sc = bScale(Bz), V = filmScale(w, h);
-      putFilm(ctx, filmImage(V, P.nx - 1, P.ny - 1, fieldColour(P, (iy, ix) => Bz[iy * P.nx + ix], sc), w, h, true), w);
+      putFilm(ctx, filmImage(V, P.nx - 1, P.ny - 1, fieldColour(P, (iy, ix) => Bz[iy * P.nx + ix], sc), w, h, true, cGeo(P, 0), cGeo(P, 1)), w);
       if (d.gmap) {   // grain boundaries (pixels without magnetic atoms) for orientation
-        const M = d.e.grain_map, c = filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? [0, 0, 0] : [255, 255, 255], w, h);
+        const M = d.e.grain_map, c = filmImage(V, M.nx, M.ny, i => d.gmap[i] < 0 ? [0, 0, 0] : [255, 255, 255], w, h, false, aGeo(d, M.pitch_nm));
         ctx.globalCompositeOperation = "multiply"; ctx.globalAlpha = .18; putFilm(ctx, c, w); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
       }
       ctx.save(); ctx.translate(-S.win.x0 * V.sx, V.y0 * V.sy);
@@ -789,12 +801,16 @@ function bxzLane() {
     height: w => Math.round(w * cur().e.size_nm[2] / S.dspan * 2),
     draw(ctx, w, h) {
       const d = cur(), P = d.e.dipole, n = P.nx * P.ny, iy = Math.min(P.ny - 1, Math.floor(S.ysec / cellNm(P, 1)));
-      putImage(ctx, gridImage(P.nx - 1, P.nz - 1, fieldColour(P, (iz, ix) => d.B[2 * P.nz * n + iz * n + iy * P.nx + ix], d.bscale || .05), 0, 1, w, h), w, 0, h, true);
       const yz = z => h - z / cur().e.size_nm[2] * h;
+      ctx.fillStyle = `rgb(${LUT.void})`; ctx.fillRect(0, 0, w, h);
+      const im = gridImage(P.nx - 1, P.nz - 1, fieldColour(P, (iz, ix) => d.B[2 * P.nz * n + iz * n + iy * P.nx + ix], d.bscale || .05), cGeo(P, 0), cGeo(P, 2), 0, d.e.size_nm[2], w, h);
+      putImage(ctx, im, w, yz(im.y1), yz(im.y0), true);
+      // dashed: the sensor height, and the top of the magnetic atoms (top atom layer + half a layer) of this run or the write
+      const G = d.grid || (refD(d) && refD(d).grid), top = G ? (G.z0_nm || 0) + (G.nz - .5) * G.pitch_z_nm : null;
       ctx.strokeStyle = css("--ink"); ctx.setLineDash([4, 3]); ctx.globalAlpha = .6;
-      for (const z of [10, (S.z + .5) * cellNm(P, 2)]) { ctx.beginPath(); ctx.moveTo(0, yz(z)); ctx.lineTo(w, yz(z)); ctx.stroke(); }
+      for (const z of [top, (S.z + .5) * cellNm(P, 2)]) if (z != null) { ctx.beginPath(); ctx.moveTo(0, yz(z)); ctx.lineTo(w, yz(z)); ctx.stroke(); }
       ctx.setLineDash([]); ctx.globalAlpha = 1;
-      setNote("bxz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(d.e.size_nm[2], 0)} nm, ×${+(h / d.e.size_nm[2] / (w / span())).toFixed(1)}`]);
+      setNote("bxz", [`y ${fmt(S.ysec)} nm`, `z 0–${fmt(d.e.size_nm[2], 0)} nm, ×${+(h / d.e.size_nm[2] / (w / span())).toFixed(1)}`, top != null ? `dashed: film top ${fmt(top, 2)} nm, sensor` : "dashed: sensor"]);
     },
     hover(x, y, ev, h) { return kv([["x", `${fmt(x)} nm`], ["z", `${fmt((1 - y / h) * cur().e.size_nm[2])} nm`]]); },
     yMode: "px",
@@ -933,7 +949,7 @@ function drawAxis(id) {
 }
 function timeText(d, t) {
   if (d.e.monte_carlo) return `MC step ${Math.round(t / d.e.dt).toLocaleString()}`;
-  return t < 1e-9 ? `${fmt(t * 1e12, 0)} ps` : `${fmt(t * 1e9, 3)} ns`;
+  return t < 1e-9 ? `${+(t * 1e12).toFixed(2)} ps` : `${fmt(t * 1e9, 3)} ns`;
 }
 function drawClock() {
   const d = cur(), el = $("clock");
@@ -955,6 +971,8 @@ function drawScrub() {
   if (d.nF <= 1) return;
   const { ctx, w, h } = fit(c, 46);
   ctx.clearRect(0, 0, w, h);
+  // shortcut: frames are placed by index while the magnetisation trace is placed by time; exact for evenly spaced
+  // frames (every bundle so far), drifts after --grain-every keeps an extra last frame. Place by time if that matters.
   const tx = f => f / (d.nF - 1) * w;
   if (d.model) {
     const p = d.model.p;
@@ -1106,7 +1124,8 @@ function drawInspector() {
     if (a.intended) rows.push([mk("intended", "i"), `${a.intended > 0 ? "↑ +z" : "↓ −z"} (bit ${a.bit + 1}, ${lagText(e)})`]);
     rows.push([mk("final m<sub>z</sub>", "r"), fmt(a.final, 3)]);
     if (a.decision_step != null) rows.push([mk("decided", "i"), timeText(d, a.decision_step * e.dt)], [mk("T then", "c"), `${fmt(a.T_dec, 0)} K`],
-      [mk("B<sub>z</sub> then", "c"), `${sgn(+(a.B_dec * e.hamr.field_uz).toFixed(2))} T (${CAT[a.category]})`],
+      [mk("head B<sub>z</sub> then", "c"), `${sgn(+(a.B_dec * e.hamr.field_uz).toFixed(2))} T (${CAT[a.category]})`],
+      a.Bz_dec != null && [mk("B<sub>z</sub> at grain then", "c"), `${sgn(+a.Bz_dec.toFixed(2))} T${a.Bz_dec === 0 && a.B_dec !== 0 ? " (outside the field box)" : ""}`],
       [mk("behind laser", "c"), `${fmt(a.lag_dec)} nm`], [mk("off track centre", "c"), `${fmt(a.dy)} nm`]);
     rows.push([mk("peak T", "c"), `${fmt(a.peakT, 0)} K`], [mk("lowest |m|", "r"), fmt(a.minM, 3)]);
   }
@@ -1536,5 +1555,5 @@ async function main() {
   await setStage(S.M.byId[want] ? want : any.id);
   window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (S.M.byId[h] && h !== S.stage) setStage(h); });
 }
-window.HV_TEST = { scoreGrains, scoreOf, lagOf, applyLag, S, D };   // for the tests: the scoring the page draws
+window.HV_TEST = { scoreGrains, scoreOf, lagOf, applyLag, S, D, grainAt, cellParts, stageFacts, drawInspector, timeText };   // read back by the tests
 main();

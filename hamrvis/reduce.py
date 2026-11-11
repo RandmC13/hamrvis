@@ -415,7 +415,7 @@ def _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor):
         gm = np.full(grid.ny * grid.nx, -1, np.int64)
         gm[col[first]] = np.where(gr[first] == nG, -1, gr[first])
         gm.astype(np.int16).tofile(os.path.join(out_dir, "grain_map.i16"))
-        entry["grain_map"] = dict(nx=grid.nx, ny=grid.ny, pitch_nm=grid.p * grid.tf / 10,
+        entry["grain_map"] = dict(nx=grid.nx, ny=grid.ny, pitch_nm=grid.p * grid.tf / 10, atom_pitch_nm=grid.p / 10,
                                   mixed_columns=int(len(col) - first.sum()))
     # periodic-aware centres (circular means) and magnetic atom counts replace grain-coordinates.txt values,
     # which include non-magnetic atoms assigned to a grain
