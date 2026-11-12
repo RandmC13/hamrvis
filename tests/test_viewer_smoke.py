@@ -153,7 +153,7 @@ class Expected:
 
 @unittest.skipUnless(have_playwright() or os.environ.get("HAMRVIS_REQUIRE_VIEWER_TEST"), "needs node and Playwright")
 class ViewerFidelity(unittest.TestCase):
-    """What the page computes and prints for a write equals what the bundle holds (P5 layer 2)."""
+    """What the page computes and prints for a write equals what the bundle holds."""
 
     def check_bundle(self, bundle):
         M = json.load(open(os.path.join(bundle, "manifest.json"), encoding="utf-8"))

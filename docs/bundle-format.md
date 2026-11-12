@@ -60,7 +60,7 @@ runs: [ {                 in run order (the order the runs started), one per tab
    snapshots            {grid: {pitch_nm, pitch_z_nm, z0_nm, nx, ny, nz, vx, vy}, volume, frames: [{index, time}],
                          skipped: [indices], dtype: "i16" | "f32" (if not int8)}
    notes                [text] what was left out and why (no grain-coordinates.txt, unreadable grain.txt)
-   hamr (hamr runs)         head model parameters (see docs/analysis.md), including Hpeak, field_uz, rise, fall
+   hamr (hamr runs)         head model parameters (see docs/how-it-works.md), including Hpeak, field_uz, rise, fall
    Tc, Tc_source, freeze_lag_nm, analysis {grains: [...], thresholds} (hamr runs)
    dipole               {nx, ny, nz, cell_nm, cell_nm_xyz [x, y, z] (if the cells are not cubes)}
                         (runs that wrote dipole-field.txt)

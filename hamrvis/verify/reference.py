@@ -270,7 +270,7 @@ def layer_means(xyz, s, pitch_A, pitch_z_A, z0_A, nz, vx, vy, factor, sites):
 
 class Head:
     """The HAMR head at a step, from the head parameters of a bundle (themselves checked against the input by
-    test_head_parameters_in_any_units), written from the definitions in docs/analysis.md and src/hamr/hamr_continuous.cpp:
+    test_head_parameters_in_any_units), written from the definitions in docs/how-it-works.md and src/hamr/hamr_continuous.cpp:
     the laser starts half a bit plus NPS before the film, moves step_nm per step, writes bits_per_track bits of nb
     steps after a lead-in of ne steps with the field off; scalar on purpose."""
 

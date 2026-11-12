@@ -1,4 +1,4 @@
-"""The pixels the viewer draws hold the data under them (P5 layer 3): sampled canvas pixels of the film (grains, atom
+"""The pixels the viewer draws hold the data under them: sampled canvas pixels of the film (grains, atom
 columns, one layer, in every colour mode), the x-z section and the stray field map must have the colour the colour map
 gives the bundle's value at that film position, and a selected grain's outline (the pixels that change when it is selected) must lie on its grain-map boundary.
 This catches drawing at the wrong place (flipped y, an offset of a pixel or more, the wrong grid), the wrong layer and

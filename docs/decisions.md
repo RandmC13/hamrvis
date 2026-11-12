@@ -123,7 +123,7 @@ snapshots and a film cut by a geometry file (1.6M atoms).
 
 ## Physics choices
 
-- The head field is rebuilt from the input with VAMPIRE's own trapezoid (`docs/analysis.md`), not read from
+- The head field is rebuilt from the input with VAMPIRE's own trapezoid (`docs/how-it-works.md`), not read from
   `output`, as a run need not write `B_applied`. Note for reading inputs: with only `sim:applied-field-strength` set,
   Hmax and Hmin keep their defaults (+1 / -1 T) and the ramp climbs Hmax - Hmin, so the peak field is 2 T, not 1 T. This
   is a property of such inputs, not of hamrvis.

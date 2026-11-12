@@ -136,12 +136,12 @@ hamrvis separates what VAMPIRE recorded from what it works out itself:
   with a separate reader that shares no code with the rest of hamrvis. Run details shows its result. It is optional:
   a bundle that was not verified shows nothing about it.
 - The write analysis is hamrvis's own interpretation, including the freezing temperature, the freeze lag and which
-  grains count as written correctly. [docs/analysis.md](docs/analysis.md) gives the definitions.
+  grains count as written correctly. [docs/how-it-works.md](docs/how-it-works.md) gives the definitions.
 
 ## Documentation
 
 - [User guide](docs/user-guide.md): every command and option, what each view shows, and troubleshooting
-- [How the write analysis works](docs/analysis.md)
+- [How hamrvis works](docs/how-it-works.md): where every number comes from, its formula, tolerance and test
 - [Bundle format](docs/bundle-format.md)
 - [Design decisions](docs/decisions.md)
 - [Changelog](CHANGELOG.md)

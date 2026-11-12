@@ -38,7 +38,7 @@ from . import vampire as vp
 FORMAT_VERSION = 2
 WORK = ".reduce-work"   # inside the bundle while reducing: per-atom indices and progress; removed at the end
 
-# write analysis thresholds (see docs/analysis.md)
+# write analysis thresholds (see docs/how-it-works.md)
 DECISION = 0.05     # m_z|m| below this in the final direction = not yet decided
 HEATED = 0.1        # |m| below this at some point = the grain was melted
 SETTLED = 0.3       # |final m_z|m|| below this = still disordered at the end
