@@ -89,7 +89,9 @@ assumed about the workflow.
 - **Order**: the order the runs started (the first time stamp of each `log`), since runs chained by checkpoints run
   one after another; then folder name. `--order` sets it by hand.
 - **Runs continued over several jobs** (`sim:load-checkpoint = continue`, same input otherwise, resuming at a step
-  the previous job reached) are one run and one tab; where jobs overlap the later one is used.
+  the previous job reached) are one run and one tab; where jobs overlap the later one is used. A job may run on another
+  number of processes or GPUs, or with another `config:output-mode` / `output-nodes`: its snapshots are read with its
+  own atom coordinates, since VAMPIRE then lists the atoms in another order.
 - **Comparisons**: a run after a write (a read, an anneal, ...) is compared with the nearest write before it: bit
   cells, bit polarity and "m_z vs intended" use that write's bits.
 

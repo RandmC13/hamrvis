@@ -157,8 +157,8 @@ def _init_worker(state):
     """Worker set-up (works with spawn, so on every platform): the per-atom bin indices stay in files mapped read-only,
     so all workers share one copy in the page cache instead of each holding its own."""
     _W.update(state)
-    _W["bins"] = [tuple(np.load(os.path.join(state["work"], f"bin{k}.{n}.npy"), mmap_mode="r") for n in BIN_ARRAYS)
-                  for k in range(state["n_files"])]
+    _W["bins"] = [[tuple(np.load(os.path.join(state["work"], f"{prefix}{k}.{n}.npy"), mmap_mode="r") for n in BIN_ARRAYS)
+                   for k in range(n_files)] for prefix, n_files in state["layouts"]]   # one set per atom layout
     _W["ct"], _W["cv"] = (np.load(os.path.join(state["work"], f"{n}.npy")) for n in ("ct", "cv"))
 
 
@@ -189,9 +189,9 @@ def _add_spins(sums, s, kt, kv, gi):
 
 
 def _bin_snapshot_checked(job):
-    idx, files, out_dir = job
+    idx, files, out_dir, lay = job
     sums = _new_sums()
-    for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
+    for f, (mask, kt, kv, gi) in zip(files, _W["bins"][lay]):
         a, m = 0, 0                                # atoms and magnetic atoms done in this file
         for s in vp.spin_chunks(f):
             sel = np.asarray(mask[a:a + len(s)])
@@ -209,13 +209,16 @@ def _window_series(snaps, out_dir, keep):
     """Results of the snapshots in keep, in order, for a run with window snapshots (hamr:active-window): the
     sums of a complete snapshot are binned in full, and a window snapshot changes them by the binned
     difference of the spins it holds (new minus old), so only the atoms near the head are touched."""
-    state, sums = None, None
-    mask_index = [np.cumsum(np.asarray(mask)).astype(np.int64) - 1 for mask, *_ in _W["bins"]]
-    for idx, t, files, window in snaps:
+    state, sums, cur = None, None, None
+    mask_index = [[np.cumsum(np.asarray(mask)).astype(np.int64) - 1 for mask, *_ in bins] for bins in _W["bins"]]
+    for (idx, t, files, window), lay in snaps:
+        if window and lay != cur:
+            raise IOError(f"snapshot {idx} is a window snapshot, the first of a job with its atoms in another order")
+        cur = lay
         if not window:
             state = []
             sums = _new_sums()
-            for f, (mask, kt, kv, gi) in zip(files, _W["bins"]):
+            for f, (mask, kt, kv, gi) in zip(files, _W["bins"][lay]):
                 s = vp.read_spins(f)
                 if len(s) != len(mask):
                     raise IOError(f"{f}: {len(s)} spins, but its coordinate file has {len(mask)} atoms")
@@ -226,7 +229,7 @@ def _window_series(snaps, out_dir, keep):
         else:
             top, vol, gs = sums
             nG = _W["n_grains"]
-            for s, f, (mask, kt, kv, gi), midx in zip(state, files, _W["bins"], mask_index):
+            for s, f, (mask, kt, kv, gi), midx in zip(state, files, _W["bins"][lay], mask_index[lay]):
                 n, pos, new = vp.read_window_spins(f)
                 if n != len(mask):
                     raise IOError(f"{f}: {n} atoms, but its coordinate file has {len(mask)}")
@@ -347,15 +350,63 @@ def _merge_counts(keys, counts, new):
     return merged, np.bincount(inv, np.concatenate([counts, c]), minlength=len(merged)).astype(np.int64)
 
 
+def _bin_files(cfiles, work, prefix, grid, magnetic, gindex, have_ids, nG, n_atoms, n_magnetic):
+    """Write work/<prefix><k>.<mask|kt|kv|gi>.npy for each coordinate file k (raw arrays after a header, for np.load's
+    mmap) and yield (xyz, mask, kt, kv, gi) per piece read, for the caller's sums."""
+    tt, tv = _index_type(grid.ny * grid.nx), _index_type(grid.nz * grid.vy * grid.vx)
+    for k, f in enumerate(cfiles):
+        out = {}
+        for n, dtype, count in (("mask", bool, n_atoms[k]), ("kt", tt, n_magnetic[k]), ("kv", tv, n_magnetic[k]),
+                                ("gi", np.int32, n_magnetic[k])):
+            out[n] = open(os.path.join(work, f"{prefix}{k}.{n}.npy"), "wb")
+            np.lib.format.write_array_header_1_0(out[n], dict(descr=np.lib.format.dtype_to_descr(np.dtype(dtype)),
+                                                              fortran_order=False, shape=(count,)))
+        for t, xyz, g in vp.coord_chunks(f):
+            mask = magnetic(t)
+            kt, kv = grid.indices(xyz[mask])
+            gi = gindex[np.clip(g[mask], 0, len(gindex) - 1)] if have_ids else np.full(mask.sum(), nG)
+            for n, a in (("mask", mask), ("kt", kt.astype(tt)), ("kv", kv.astype(tv)), ("gi", gi.astype(np.int32))):
+                a.tofile(out[n])
+            yield xyz, mask, kt, kv, gi
+        for fh in out.values():
+            fh.close()
+
+
+def _grain_lookup(entry):
+    """(is-magnetic test for atom types, grain ID -> grain index with nG for other IDs) of a run."""
+    mtypes, ids = entry["magnetic_types"], entry["grains"]["id"]
+    gindex = np.full(max(ids, default=-1) + 2, len(ids), np.int64)
+    gindex[ids] = np.arange(len(ids))
+    return (lambda t: np.ones(len(t), bool)) if mtypes is None else (lambda t: np.isin(t, mtypes)), gindex
+
+
+def _segment_layout(cfiles, entry, work, prefix, grid, have_ids):
+    """Bins of a later job of a run, from its own coordinate files: a job continued on another number of processes
+    or with another file layout lists the atoms in another order. Its atoms must fill the pixels exactly as the
+    first job's did (the same system), else the reduce stops."""
+    magnetic, gindex = _grain_lookup(entry)
+    n_atoms, n_magnetic = [], []
+    for f in cfiles:
+        n, nm = 0, 0
+        for t, _, _ in vp.coord_chunks(f):
+            n, nm = n + len(t), nm + int(magnetic(t).sum())
+        n_atoms.append(n)
+        n_magnetic.append(nm)
+    ct = np.zeros(grid.ny * grid.nx)
+    for _, _, kt, _, _ in _bin_files(cfiles, work, prefix, grid, magnetic, gindex, have_ids, len(entry["grains"]["id"]),
+                                     n_atoms, n_magnetic):
+        ct += np.bincount(kt, minlength=ct.size)
+    if not np.array_equal(ct, np.load(os.path.join(work, "ct.npy"))):
+        raise SystemExit(f"{os.path.dirname(cfiles[0])}: its atoms differ from those of the job it continues")
+    return max(n_atoms)
+
+
 def _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor):
     """Read the coordinate files a piece at a time: lattice extent, then per-atom bin indices (written to work/, one
     set per data file), atom counts per pixel, grain map, grain centres. Returns what the snapshot pass needs."""
     Lx, Ly = entry["size_nm"][:2]
-    mtypes, ids = entry["magnetic_types"], entry["grains"]["id"]
-    nG = len(ids)
-    gindex = np.full(max(ids, default=-1) + 2, nG, np.int64)          # grain ID -> grain index; nG collects other IDs
-    gindex[ids] = np.arange(nG)
-    magnetic = (lambda t: np.ones(len(t), bool)) if mtypes is None else (lambda t: np.isin(t, mtypes))
+    nG = len(entry["grains"]["id"])
+    magnetic, gindex = _grain_lookup(entry)
     log(f"  reading {len(cfiles)} coordinate files")
     stats, have_ids, atoms_per_file, magnetic_per_file = None, True, [], []
     for f in cfiles:
@@ -380,29 +431,15 @@ def _coordinate_pass(cfiles, entry, out_dir, work, opts, layer_factor):
     ct, cv = np.zeros(grid.ny * grid.nx), np.zeros(grid.nz * grid.vy * grid.vx)
     cx, sx, cy, sy, na = (np.zeros(nG + 1) for _ in range(5))
     keys, counts = None, None
-    tt, tv = _index_type(ct.size), _index_type(cv.size)
-    for k, f in enumerate(cfiles):
-        out = {}
-        for n, dtype, count in (("mask", bool, atoms_per_file[k]), ("kt", tt, magnetic_per_file[k]),
-                                ("kv", tv, magnetic_per_file[k]), ("gi", np.int32, magnetic_per_file[k])):
-            out[n] = open(os.path.join(work, f"bin{k}.{n}.npy"), "wb")   # raw arrays after a header, for np.load's mmap
-            np.lib.format.write_array_header_1_0(out[n], dict(descr=np.lib.format.dtype_to_descr(np.dtype(dtype)),
-                                                              fortran_order=False, shape=(count,)))
-        for t, xyz, g in vp.coord_chunks(f):
-            mask = magnetic(t)
-            kt, kv = grid.indices(xyz[mask])
-            gi = gindex[np.clip(g[mask], 0, len(gindex) - 1)] if have_ids else np.full(mask.sum(), nG)
-            ct += np.bincount(kt, minlength=ct.size)
-            cv += np.bincount(kv, minlength=cv.size)
-            ax, ay = 2 * np.pi * xyz[mask, 0] / (Lx * 10), 2 * np.pi * xyz[mask, 1] / (Ly * 10)
-            for acc, v in ((cx, np.cos(ax)), (sx, np.sin(ax)), (cy, np.cos(ay)), (sy, np.sin(ay)), (na, 1.0)):
-                acc += np.bincount(gi, np.broadcast_to(v, gi.shape), minlength=nG + 1)
-            if have_ids and nG:
-                keys, counts = _merge_counts(keys, counts, kt.astype(np.int64) * (nG + 1) + gi)   # (column, grain)
-            for n, a in (("mask", mask), ("kt", kt.astype(tt)), ("kv", kv.astype(tv)), ("gi", gi.astype(np.int32))):
-                a.tofile(out[n])
-        for fh in out.values():
-            fh.close()
+    for xyz, mask, kt, kv, gi in _bin_files(cfiles, work, "bin", grid, magnetic, gindex, have_ids, nG,
+                                            atoms_per_file, magnetic_per_file):
+        ct += np.bincount(kt, minlength=ct.size)
+        cv += np.bincount(kv, minlength=cv.size)
+        ax, ay = 2 * np.pi * xyz[mask, 0] / (Lx * 10), 2 * np.pi * xyz[mask, 1] / (Ly * 10)
+        for acc, v in ((cx, np.cos(ax)), (sx, np.sin(ax)), (cy, np.cos(ay)), (sy, np.sin(ay)), (na, 1.0)):
+            acc += np.bincount(gi, np.broadcast_to(v, gi.shape), minlength=nG + 1)
+        if have_ids and nG:
+            keys, counts = _merge_counts(keys, counts, kt.astype(np.int64) * (nG + 1) + gi)   # (column, grain)
     entry["atoms_source"] = dict(coordinate_files=len(cfiles), bytes=sum(os.path.getsize(f) for f in cfiles))
 
     # grain map: the grain of the magnetic atoms in each column (columns hold one grain in a columnar film; the
@@ -491,6 +528,23 @@ def reduce_atoms(dirs, out_dir, entry, series=None, volume=True, every=1, worker
     snaps = all_snaps = run_snapshots(dirs, entry["dt"])
     if not snaps:
         return
+    # one atom layout per job that wrote its own coordinate files (a job continued on another number of processes
+    # lists its atoms in another order); a job without them uses the layout before it
+    layouts, max_atoms = [("bin", len(cfiles))], A["max_atoms"]
+    lay_of = {s[0]: 0 for s in vp.snapshots(dirs[0])}     # snapshot number -> layout; a later job wins, as in run_snapshots
+    for k, d in enumerate(dirs[1:], 1):
+        cf = vp.coord_files(d)
+        if cf:
+            done_file = os.path.join(work, f"seg{k}.json")
+            if os.path.exists(done_file):
+                n_max = json.load(open(done_file))["max_atoms"]
+            else:
+                log(f"  reading the coordinate files of {os.path.basename(d)}")
+                n_max = _segment_layout(cf, entry, work, f"seg{k}-", grid, have_ids)
+                _save_json(done_file, dict(max_atoms=n_max))
+            layouts.append((f"seg{k}-", len(cf)))
+            max_atoms = max(max_atoms, n_max)
+        lay_of.update({s[0]: len(layouts) - 1 for s in vp.snapshots(d)})
     snaps = snaps[::every] if snaps[-1] in snaps[::every] else snaps[::every] + [snaps[-1]]
     log(f"  {len(snaps)} snapshots")
     for d in ("top", "vol") if volume else ("top",):
@@ -498,7 +552,7 @@ def reduce_atoms(dirs, out_dir, entry, series=None, volume=True, every=1, worker
     np.minimum(ct, 255).astype(np.uint8).tofile(os.path.join(out_dir, "top_count.u8"))
     np.minimum(cv, 255).astype(np.uint8).tofile(os.path.join(out_dir, "vol_count.u8"))
     bits = opts.get("precision", 8)
-    state = dict(grid=grid, volume=volume, n_grains=nG, bits=bits, work=work, n_files=len(cfiles))
+    state = dict(grid=grid, volume=volume, n_grains=nG, bits=bits, work=work, layouts=layouts)
     step_of = {i: int(round(t / entry["dt"])) for i, t, _, _ in snaps}
     min_m = np.full(ct.size, np.inf, np.float32)
     checks, q_max, t0, bad, done = [], 0.0, time.time(), set(), set()
@@ -508,20 +562,20 @@ def reduce_atoms(dirs, out_dir, entry, series=None, volume=True, every=1, worker
             done, bad = set(z["done"].tolist()), set(z["bad"].tolist())
             min_m, q_max, checks = z["min_m"], float(z["q_max"]), [tuple(c) for c in z["checks"].tolist()]
         log(f"  carrying on: {len(done)} of {len(snaps)} snapshots done by the interrupted reduce")
-    jobs = [(i, files, out_dir) for i, _, files, _ in snaps if i not in done]
+    jobs = [(i, files, out_dir, lay_of[i]) for i, _, files, _ in snaps if i not in done]
     windowed = any(w for *_, w in all_snaps)
     if windowed:
         log("  window snapshots (hamr:active-window): read in order, each updating the previous one")
         _init_worker(state)
         pool = contextlib.nullcontext()
     else:
-        each = worker_memory(grid, A["max_atoms"], volume, bits)
+        each = worker_memory(grid, max_atoms, volume, bits)
         n, why = worker_count(len(jobs) or 1, each, workers, opts.get("mem"))
         log(f"  {n} snapshot workers ({why})")
         pool = ProcessPoolExecutor(n, multiprocessing.get_context("spawn"), _init_worker, (state,))
     saved = time.time()
     with pool as P:
-        results = _window_series(all_snaps, out_dir, {j[0] for j in jobs}) if windowed else \
+        results = _window_series([(sn, lay_of[sn[0]]) for sn in all_snaps], out_dir, {j[0] for j in jobs}) if windowed else \
             (f.result() for f in as_completed([P.submit(_bin_snapshot, j) for j in jobs]))
         for n, (idx, m, gs, q_err) in enumerate(_until_worker_lost(results), 1):
             if m is None:

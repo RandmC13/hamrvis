@@ -1,6 +1,7 @@
 """Make the VAMPIRE test scenarios in tests/scenarios/: python3 tests/make_scenarios.py /path/to/vampire-serial [scenario ...]
 
-file-per-process needs the MPI build: python3 tests/make_scenarios.py /path/to/vampire-parallel file-per-process.
+file-per-process needs the MPI build: python3 tests/make_scenarios.py /path/to/vampire-parallel file-per-process;
+mpi-continue both: VAMPIRE_SERIAL=/path/to/vampire-serial python3 tests/make_scenarios.py /path/to/vampire-parallel mpi-continue.
 
 Every scenario is a folder of runs on the tiny granular film of tests/fixture-run (2,624 atoms), chained by
 checkpoints the way HAMR studies chain them. The tests reduce each folder as a whole, so they check that hamrvis
@@ -134,7 +135,9 @@ def continue_from(vampire, prev, d, text):
     """Second job of a run cut short: copy the checkpoint and resume with load-checkpoint = continue."""
     os.makedirs(d)
     shutil.copy(os.path.join(BASE, "m.mat"), d)
-    shutil.copy(os.path.join(prev, "vampire0.chk"), d)
+    for f in os.listdir(prev):                    # every process's checkpoint (a job on several processes)
+        if f.endswith(".chk"):
+            shutil.copy(os.path.join(prev, f), d)
     with open(os.path.join(d, "input"), "w") as f:
         f.write("".join(FILM) + text + "sim:load-checkpoint = continue\nsim:save-checkpoint = end\n")
     with open(os.path.join(d, "stdout"), "w") as so:
@@ -173,6 +176,10 @@ def scenario(name, vampire):
             film=[l.replace("config:output-format = binary", "config:output-format = text") for l in FILM])
     elif name == "file-per-process":          # 2 MPI ranks, one data file per rank (vampire = the parallel build)
         run(vampire, j("write"), HAMR + "config:output-mode = file-per-process\n", save=False, ranks=2)
+    elif name == "mpi-continue":              # a write on 2 ranks (one file each) killed mid-write, continued on 1:
+        # the second job lists its atoms in another order (vampire = the parallel build, serial = vampire-serial)
+        run(vampire, j("job1"), HAMR + "config:output-mode = file-per-process\n", ranks=2, kill_after_snapshot=4)
+        continue_from(os.environ.get("VAMPIRE_SERIAL", vampire), j("job1"), j("job2"), HAMR)
     elif name == "custom-names":              # --input-file / --output-file and other units, same write
         run(vampire, j("write"), "", save=False, film=[in_units(FILM + [HAMR])], input_name="write.in",
             args=["--input-file", "write.in", "--output-file", "results.txt"])

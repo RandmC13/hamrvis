@@ -209,6 +209,9 @@ def check_run(bundle, e, res, every=1, log=None):
             frames = sn["frames"]
             res.add(rid, "snapshot list (numbers, times)", len(frames), 0, "exact",
                     all(f["index"] in listed_snaps and listed_snaps[f["index"]][1] == f["time"] for f in frames))
+            left = sn.get("skipped") or []
+            res.add(rid, "snapshots left out", len(frames) + len(left), len(left), "none", not left,
+                    f"left out by the reduce: {left[:5]}{' ...' if len(left) > 5 else ''}" if left else "")
             check = {f["index"] for f in frames[::every]} | {frames[-1]["index"]}
             tol = 0.5 / step if step else 1e-7
             worst_t = worst_v = 0.0
@@ -217,7 +220,14 @@ def check_run(bundle, e, res, every=1, log=None):
             low = np.full(nx * ny, np.inf)
             want_snap = {f["index"] for f in frames} if every == 1 else check
             start = time.time()
+            atoms = (xyz_m, mag)
             for seg in dict.fromkeys(listed_snaps[f["index"]][0] for f in frames):
+                if seg != src and os.path.exists(os.path.join(seg, "atoms-coords.meta")):
+                    # a job continued on another number of processes lists its atoms in another order: its own list
+                    t2, x2 = ref.coordinates(seg)
+                    m2 = np.isin(t2, mats) if mats is not None else np.ones(len(t2), bool)
+                    atoms = (x2[m2], m2)
+                xyz_m, mag = atoms
                 for idx, s in ref.spin_states(seg, want_snap):
                     if listed_snaps[idx][0] != seg or idx not in want_snap:
                         continue

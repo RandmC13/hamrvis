@@ -1,7 +1,7 @@
 // hamrvis viewer: loads a bundle made by `hamrvis reduce` (docs/bundle-format.md) and draws it.
 // Data comes from bundle/<path> over HTTP (`hamrvis view`) or from window.HV_EMBED (`hamrvis export`).
 "use strict";
-const HAMRVIS_VERSION = "0.9.1"; // same as hamrvis/__init__.py (a test checks)
+const HAMRVIS_VERSION = "1.0.0"; // same as hamrvis/__init__.py (a test checks)
 const ANALYSIS_MODEL = "0.9.1";   // first hamrvis version whose write analysis matches the current one (docs/analysis.md)
 const older = v => !v || v.split(".").map(Number).reduce((c, x, i) => c || x - (+ANALYSIS_MODEL.split(".")[i] || 0), 0) < 0;
 

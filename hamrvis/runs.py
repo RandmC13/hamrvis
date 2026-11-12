@@ -19,8 +19,9 @@ TYPES = [
 ]
 TITLES = dict((n, t) for n, t, _ in TYPES)
 
-# input keys that may differ between the jobs of one continued run
-_CHECKPOINT_KEYS = re.compile(r"sim:(load|save)-checkpoint")
+# input keys that may differ between the jobs of one continued run: the checkpoint keys, and keys that only say where
+# it runs or how its files are laid out (a job continued on another number of processes or on a GPU)
+_CHECKPOINT_KEYS = re.compile(r"sim:(load|save)-checkpoint|config:output-(mode|nodes)$|gpu:")
 
 
 def is_monte_carlo(inp):

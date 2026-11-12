@@ -308,6 +308,22 @@ class RunDiscovery(unittest.TestCase):
 
     def test_continued_jobs_are_one_run(self):
         self.assertEqual(self.found("split-write"), [("job1", "hamr", ["job1", "job2"])])
+        # the first job on 2 processes with a file each, continued on 1: its input differs in the output mode
+        self.assertEqual(self.found("mpi-continue"), [("job1", "hamr", ["job1", "job2"])])
+
+    def test_continued_on_other_hardware_is_one_run(self):
+        # the first job on several processes with one file each, or on a GPU: still the same run; a changed physics
+        # key makes it another run
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "split")
+            shutil.copytree(os.path.join(SCEN, "split-write"), root)
+            with open(os.path.join(root, "job1", "input"), "a") as f:
+                f.write("config:output-mode = file-per-process\nconfig:output-nodes = 4\ngpu:acceleration\n")
+            ids = lambda: [(r.id, [os.path.basename(d) for d in r.dirs]) for r in runs.find([root])]
+            self.assertEqual(ids(), [("job1", ["job1", "job2"])])
+            with open(os.path.join(root, "job2", "input"), "a") as f:
+                f.write("sim:temperature = 400\n")
+            self.assertEqual(ids(), [("job1", ["job1"]), ("job2", ["job2"])])
 
     def test_order_follows_the_logs_not_the_names(self):
         # names sort as read, relax, write; the logs say relax ran first

@@ -26,6 +26,7 @@ CASES = {   # bundle name: (scenario, reduce options)
     "chain": ("chain", {}), "two-tracks": ("two-tracks", {}), "continuous": ("continuous", {}),
     "text-snapshots": ("text-snapshots", {}), "custom-names": ("custom-names", {}),
     "file-per-process": ("file-per-process", {}), "split-write": ("split-write", {}), "rewrite": ("rewrite", {}),
+    "mpi-continue": ("mpi-continue", {}),          # continued on fewer processes: its atoms in another order
     "p16": ("write-only", dict(precision=16)), "p32": ("write-only", dict(precision=32, grain_precision=32)),
     "coarse": ("chain", dict(top_max=300, layer_max=800)),     # columns of several sites
     "thinned": ("write-only", dict(grain_every=3)),
@@ -67,10 +68,11 @@ class BundleAgainstRawFiles(unittest.TestCase):
         for q in ("output table", "head parameters", "grain list", "grain series", "magnetic materials", "grid",
                   "atoms per column", "atoms per layer cell", "grain map", "mixed columns", "grain centres",
                   "magnetic atoms per grain", "snapshot list", "snapshot columns", "snapshot layers", "lowest column |m|",
-                  "dipole field", "atoms per dipole cell"):
+                  "dipole field", "atoms per dipole cell", "snapshots left out"):
             self.assertIn(q, what)
         names = {n for n, _, _ in done}
-        self.assertTrue({"p16", "p32", "window", "coarse", "thinned", "split-write", "file-per-process", "text-snapshots"} <= names)
+        self.assertTrue({"p16", "p32", "window", "coarse", "thinned", "split-write", "file-per-process", "text-snapshots",
+                         "mpi-continue"} <= names)
         self.assertIn(("coarse", "grid", "(top map coarsened by an option)"), done)
         self.assertIn(("split-write", "output table (joined jobs)"), full)
         self.assertTrue(any(n == "window" and w.startswith("snapshot columns") for n, w in full))

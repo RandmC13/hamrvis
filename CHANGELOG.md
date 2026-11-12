@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.9.1 (unreleased)
+## 1.0.0 (2026-11-12)
+
+First release, including everything listed below. Checked at full size: an 8.7-million-atom relax, write (with and
+without the active window) and read-back reduce to bundles that match the raw files in every stored value, within the
+stored precision.
+
+## 0.9.1 (not released)
 
 Added:
 
@@ -24,12 +30,16 @@ Changed:
 
 Fixed:
 
+- A run continued in a job on another number of processes (or with another output mode) was split into two tabs,
+  and once joined, the later job's snapshots were left out: they were read with the first job's atom coordinates,
+  which list the atoms in another order. Each job's snapshots are now read with its own coordinates (checked to
+  hold the same atoms), and `hamrvis verify` fails a bundle that left snapshots out.
 - A grain with no magnetic atoms (a non-magnetic layer VAMPIRE gives a grain ID, for which `grain.txt` holds 0) is no
   longer counted as a melted, undecided grain: it was part of the score's denominator (the large run read 116 / 143,
   not 116 / 142). Such grains now have the category "no magnetic atoms" and are left out of the write analysis.
   Bundles reduced before this open with the warning that their analysis is older.
 
-## 0.9.0 (unreleased)
+## 0.9.0 (not released)
 
 First packaged version.
 
