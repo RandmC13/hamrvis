@@ -1,10 +1,9 @@
 # hamrvis
 
-**See what happened in your VAMPIRE heat-assisted magnetic recording (HAMR) simulations.**
+**VAMPIRE heat-assisted magnetic recording (HAMR) simulation visualiser.**
 
 [VAMPIRE](https://vampire.york.ac.uk/) writes gigabytes of numbers. hamrvis turns a folder of finished runs into an
-interactive page in your browser: watch the laser cross the film, see which grains froze with which magnetisation,
-and check whether each bit was written as intended.
+interactive page in the browser.
 
 ![The hamrvis viewer showing a HAMR write on a small example film](docs/viewer.png)
 
@@ -28,17 +27,13 @@ Your browser opens at <http://127.0.0.1:8737/>. There is one tab per run, here a
 a read-back. Open **Write**, press play, and hover over a grain to see its history. Press Ctrl+C in the terminal to
 stop the viewer.
 
-Nothing leaves your computer: the viewer runs locally. The page does load its font from Google Fonts, and falls back
-to a system font when offline.
-
 ## How it works
 
-There are two steps, because simulation data is usually too large to move around:
+There are two steps, because simulation data is usually cumbersome to copy:
 
-1. **`hamrvis reduce`** condenses your runs into a *bundle*, a folder of averaged data. Run it where the data is, for
-   example on your cluster. In one 8.7-million-atom write, 90 GB of spin snapshots became about 2.2 GB.
-2. **`hamrvis view`** shows a bundle in your browser. Run it wherever is convenient, for example on your own
-   computer.
+1. **`hamrvis reduce`** condenses your runs into a *bundle*, a folder of averaged data.
+   In one 8.7-million-atom write, 90 GB of spin snapshots became about 2.2 GB.
+2. **`hamrvis view`** opens the bundle in your browser.
 
 Bundles hold averages rounded to a stated precision, so keep your VAMPIRE output if you may need the exact values.
 The [user guide](docs/user-guide.md#how-much-is-kept) says what is kept.
@@ -116,7 +111,7 @@ your run folders, so check Run details before sharing.
 ## What you can see
 
 | Tab | Shown for | Views |
-|---|---|---|
+| --- | --- | --- |
 | **Write** | `sim:program = hamr-simulation` | Bits, film, laser and field overlays, space–time diagram, per-grain life stories, write analysis |
 | **Monte Carlo** | Monte Carlo integrators | Grain and atom views, against Monte Carlo steps |
 | **Read-back** | Dipole field output | Stray-field map, field section, read-back waveform |
