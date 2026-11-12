@@ -22,6 +22,7 @@
     <button id="v-layer" aria-pressed="false">One layer</button>
   </div>
   <label class="ctl" id="layer-ctl" hidden>Layer <input id="layer" type="range" min="0" max="0" value="0"><output id="layer-out"></output></label>
+  <label class="ctl" id="smooth-ctl" hidden title="Average neighbouring pixels on screen (the data and the tooltip are not changed)">Smooth <select id="smooth"><option value="1">off</option><option value="2">2 × 2</option><option value="4">4 × 4</option><option value="8">8 × 8</option></select></label>
   <div class="seg" role="group" aria-label="Colour by">
     <button id="c-mz" aria-pressed="true">m<sub>z</sub></button>
     <button id="c-agree" aria-pressed="false">m<sub>z</sub> vs intended</button>

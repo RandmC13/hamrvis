@@ -4,15 +4,23 @@
 
 Added:
 
+- Viewer: *Smooth* in the atom column and layer views (off by default) averages 2 × 2 to 8 × 8 neighbouring pixels
+  on screen, so a melted region, whose few atoms per pixel keep a random mean, shows as pale; the data and the
+  tooltip are unchanged.
 - `hamrvis verify <bundle>` checks every array and number of a bundle against the raw run files with an independent
   reader (formerly `tests/fidelity/bundle_check.py`, which still works), stores the result in the manifest and the
   viewer shows it under Run details.
 
 Changed:
 
-- Viewer: the score-against-lag chart says the score peaks again about every period of the bit sequence, the outcome
-  table names the head field at the decision and counts grains decided outside the field box, and the lowest column
-  |m| readout gives the number of snapshots it covers.
+- Viewer: shorter labels in the stage boxes, tooltips and write analysis, without the r/c/i superscripts (the source
+  of a readout shows on hovering its label); the explanation of the analysis is one collapsed list with the lag formula
+  on its own line; the decision positions plot spans the page and fits the data; the controls stay at the top while
+  scrolling, so the sensor height and reader width can be changed next to the field lanes; tooltips no longer
+  flicker during playback (in the atom and layer views their column rows disappeared while the next snapshot loaded;
+  they now keep the values shown until it arrives, as the film does); Run details gives the number of snapshots, lists
+  the checks made when reducing as plain statements of what was compared, and shows a verify result only when there
+  is one.
 
 Fixed:
 

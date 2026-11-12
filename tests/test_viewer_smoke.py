@@ -49,8 +49,10 @@ class ViewerSmoke(unittest.TestCase):
                             time.sleep(0.1)
                     r = subprocess.run(["node", "viewer_smoke.js", url] + runs, cwd=HERE, capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                    want = "checks, 0 differ" if checked else "not verified"
-                    self.assertEqual(r.stdout.count(want), len(runs), r.stdout)
+                    if checked:
+                        self.assertEqual(r.stdout.count("checks, 0 differ"), len(runs), r.stdout)
+                    else:          # an unverified bundle has no such row
+                        self.assertEqual(r.stdout.count("(no row)"), len(runs), r.stdout)
                 finally:
                     view.kill()
                     view.wait()
@@ -175,10 +177,10 @@ class ViewerFidelity(unittest.TestCase):
                     self.assertEqual([[t, b, w, {int(k): c for k, c in parts}] for t, b, w, parts in v["cells"]], cells)
                     facts = dict(v["facts"])
                     ok, n = X.grains_ok(lag)
-                    self.assertEqual(facts["melted grains matching their bit at end"], f"{ok} / {n} ({100 * ok / n:.0f} %)")
+                    self.assertEqual(facts["grains correct at end"], f"{ok} / {n} ({100 * ok / n:.0f} %)")
                     bok, bn = X.bits_ok(cells)
                     if bn:
-                        self.assertEqual(facts["bits matching intended at end"], f"{bok} / {bn}")
+                        self.assertEqual(facts["bits correct at end"], f"{bok} / {bn}")
                     if X.gm:
                         for x, y, g in v["hover"]:
                             ix, iy = int(np.rint(x / X.a)) // X.f, int(np.rint(y / X.a)) // X.f

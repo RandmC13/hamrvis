@@ -58,9 +58,9 @@ use and its source. A chart shows the score against the lag with the lag in use 
 (`scoreGrains` in `app.js`) is tested to give the reducer's bit, intended direction and outcome for every grain at
 the bundle's own lag.
 
-Readouts are marked `r` (recorded by VAMPIRE: magnetisation, |m|, column values), `c` (reconstructed from the
-input with the head model: laser temperature, head field, positions relative to the laser) or `i` (interpreted
-by hamrvis: decision, intended bit, outcomes, freezing temperature, lag).
+Each readout's label says on hover where its value comes from: recorded by VAMPIRE (magnetisation, |m|, column
+values), reconstructed from the input with the head model (laser temperature, head field, positions relative to the
+laser) or interpreted by hamrvis (decision, intended bit, outcomes, freezing temperature, lag).
 
 A bundle reduced before the current analysis model (hamrvis 0.9.1; bundles without `hamrvis_version` are older)
 opens with a warning that its write analysis may differ from what this version computes.

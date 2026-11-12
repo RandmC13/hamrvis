@@ -228,8 +228,7 @@ class ViewerReadouts(unittest.TestCase):
             mzc, n, low = R.column(f, x, y)
             want["column mz"] = ("–" if mzc != mzc else mzc)
             want["atoms in column"] = n
-            ns = len(R.snaps)
-            want[f"lowest column |m| over {ns} snapshot{'s' if ns > 1 else ''}"] = low
+            want["lowest column |m|"] = low
         if h:
             want["laser T now"] = h.T(x, y, R.steps[f])
             want["peak laser T"] = h.peak_T(x, y)

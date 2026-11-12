@@ -76,7 +76,8 @@ button, select, input { font: inherit; color: inherit; }
 .chain button:disabled { opacity: .4; cursor: default; }
 .chain .arrow { align-self: center; width: 0; }
 
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding-block: 0 10px; border-bottom: 1px solid var(--rule); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding-block: 8px 10px; border-bottom: 1px solid var(--rule);
+  position: sticky; top: 0; z-index: 15; background: var(--bg); }   /* stays in view, e.g. sensor z next to the field lanes */
 .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
 .seg button { border: 0; background: transparent; padding: 4px 11px; cursor: pointer; font-size: 13px; }
 .seg button + button { border-left: 1px solid var(--rule); }
@@ -143,10 +144,12 @@ button, select, input { font: inherit; color: inherit; }
 .figkey i.line { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--ink); vertical-align: 3px; }
 .detail-facts { max-width: 760px; margin-bottom: 14px; }
 .detail-facts .facts dd { text-align: left; }
-#tip .facts { margin: 0; gap: 1px 14px; }
+.detail-facts h3 { margin: 14px 0 0; font-size: 15px; font-weight: 650; }
+#tip .facts { margin: 0; gap: 0 12px; grid-template-columns: auto auto; }
+#tip .facts dd { font-variant-numeric: tabular-nums; }
 
 /* inspector */
-.inspector { min-width: 0; background: var(--lane); border-radius: 6px; padding: 14px 16px 16px; align-self: start; position: sticky; top: max(12px, env(safe-area-inset-top, 0px)); }
+.inspector { min-width: 0; background: var(--lane); border-radius: 6px; padding: 14px 16px 16px; align-self: start; position: sticky; top: calc(var(--controls-h, 56px) + 12px); }
 .inspector h2 { margin: 0; font-size: 20px; font-weight: 700; font-stretch: 85%; line-height: 1.1; text-wrap: balance; }
 .inspector .sub { margin: 3px 0 10px; color: var(--muted); font-size: 13px; }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; margin: 6px 0 10px; }
@@ -167,7 +170,7 @@ button, select, input { font: inherit; color: inherit; }
 /* tooltip */
 #tip {
   position: fixed; pointer-events: none; z-index: 20; background: var(--lane); color: var(--ink); border: 1px solid var(--rule);
-  border-radius: 6px; padding: 7px 10px; font-size: 12.5px; line-height: 1.45; box-shadow: 0 6px 18px rgba(10, 20, 30, .18);
+  border-radius: 6px; padding: 6px 10px; font-size: 12.5px; line-height: 1.35; box-shadow: 0 6px 18px rgba(10, 20, 30, .18);
   max-width: 280px;
 }
 #tip b { font-weight: 650; }
@@ -179,8 +182,10 @@ button, select, input { font: inherit; color: inherit; }
 .stats { display: flex; flex-wrap: wrap; gap: 14px 40px; margin-bottom: 18px; }
 .stat b { display: block; font-size: 26px; font-weight: 700; font-stretch: 80%; line-height: 1.05; }
 .stat span { font-size: 12.5px; color: var(--muted); }
-.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 18px 28px; }
+.figs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; }
+@media (max-width: 860px) { .figs { grid-template-columns: minmax(0, 1fr); } }
 .fig { min-width: 0; }
+.fig.wide { grid-column: 1 / -1; }
 .fig h3 { margin: 0 0 2px; font-size: 15px; font-weight: 650; }
 .fig p { margin: 0 0 8px; font-size: 13px; color: var(--muted); max-width: 64ch; }
 .fig svg { display: block; width: 100%; background: var(--lane); border-radius: 3px; }
@@ -216,7 +221,11 @@ td.num { text-align: right; }
 .lagctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 0 0 8px; font-size: 13px; }
 .lagctl input[type=number] { width: 6em; } .lagctl input[type=text] { width: 16em; }
 .lagctl .lagnow { color: var(--muted); }
-.how { margin: 0 0 14px; font-size: 13px; color: var(--muted); max-width: 100ch; }
-sup.src { font-size: 9px; font-weight: 700; color: var(--muted); margin-left: 2px; cursor: help; }
+.how { margin: 18px 0 14px; font-size: 13px; color: var(--muted); max-width: 100ch; }
+details.how summary { cursor: pointer; color: var(--ink); font-weight: 600; }
+details.how ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; }
+details.how b { color: var(--ink); font-weight: 600; }
+.formula { margin: 6px 0 2px; font-size: 14px; color: var(--ink); font-family: var(--font); }
+.formula sub { font-size: 70%; }
 .figkey i.line.solid { border-top-style: solid; }
 #inspector .facts dd { white-space: nowrap; }   /* values on one line; the labels wrap instead */

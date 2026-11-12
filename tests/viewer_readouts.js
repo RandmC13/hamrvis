@@ -32,7 +32,7 @@ const { chromium } = require("playwright");
           if (view === "atoms" && !d.snaps) continue;
           if (view === "grains" && !d.nG) continue;
           S.view = view; S.cells = S.pol = false;
-          if (view === "atoms") await until(() => rows(T.filmTip(...pts[0])).some(r => r[0].startsWith("column")));
+          if (view === "atoms") { const s = T.nearestSnap(d, d.steps[S.f]); await until(() => (T.filmTip(...pts[0]), s && d.top.get(s.index))); }   // the frame's own snapshot, not the one shown before it
           fr.tips[view] = pts.map(([x, y]) => [x, y, rows(T.filmTip(x, y))]);
         }
         if (e.hamr && d.g && d.an) {   // bit cells and polarity on: the tooltip adds the bit's mean m_z

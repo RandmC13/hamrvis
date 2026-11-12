@@ -129,8 +129,8 @@ ENCODINGS = {8: ("i8", np.int8, 127), 16: ("i16", np.int16, 32767), 32: ("f32", 
 
 
 def _quantise(sums, count, bits=8):
-    """Mean direction components: int8 x 1/127 (-128 where a pixel has no atoms), int16 x 1/32767 (-32768) or
-    float32 (NaN)."""
+    """Mean spin components (the average of the atoms' unit spins, so shorter than 1 when they disagree): int8 x 1/127
+    (-128 where a pixel has no atoms), int16 x 1/32767 (-32768) or float32 (NaN)."""
     _, dtype, sc = ENCODINGS[bits]
     with np.errstate(invalid="ignore", divide="ignore"):
         if sc is None:

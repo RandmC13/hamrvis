@@ -152,6 +152,9 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
   - *Film*: grains (shapes from the atoms), atom columns (through-thickness average) or one atomic layer; coloured
     by m_z, m_z against the intended bit (never-melted grains grey), peak laser temperature or the lowest |m|
     reached. Laser isotherms (bold: freezing temperature) and the head-field box with its direction and strength.
+    An atom column averages about 40 atoms and a layer cell only a few, so a melted region looks speckled rather
+    than white: *Smooth* (off by default) averages 2 × 2 to 8 × 8 neighbouring pixels on screen only (empty pixels
+    stay empty; the tooltip keeps the stored values).
     The dashed line is the section line: click the film to move it. *Bit cells* overlays every bit's region on
     every track and the band hotter than the freezing temperature (the part of the track that can be written).
     *Bit polarity* outlines each cell's part inside that band in the colour of its mean m_z (atom-weighted over
@@ -172,8 +175,9 @@ taken from the atom positions, not from VAMPIRE's Voronoi outlines. See `docs/de
   short event stays visible (the same on the time line under the film).
 - **Analysis** (write): melted grains matching their intended bit, the inferred freezing temperature and lag, a lag
   control (inferred, none, custom or from bit centre positions; viewer only, the bundle is unchanged) with the score
-  against the lag, where each grain froze, outcomes by circumstance. Readouts are marked `r` recorded by VAMPIRE,
-  `c` reconstructed from the input, `i` interpreted by hamrvis (docs/analysis.md).
+  against the lag, where each grain froze (full width), outcomes by head field, and a collapsed "How these are worked
+  out". Hovering a readout's label says whether VAMPIRE recorded it, hamrvis reconstructed it from the input or
+  interpreted it (docs/analysis.md). The view and colour controls stay at the top of the window while scrolling.
 - **Save PNG** stacks the lanes into one image (local viewer only).
 
 Colours: magnetisation is blue (down) to red (up); fields are green (down) to purple (up), so a field never reads
