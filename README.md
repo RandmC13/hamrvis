@@ -110,7 +110,7 @@ hamrvis export my-bundle -o my-run.html
 ```
 
 It keeps every 4th grain frame by default and stops if the page goes over 15.5 MB. See the
-[user guide](docs/user-guide.md#commands) for how to change these. Bundles and exported pages record the full paths of
+[user guide](docs/user-guide.md#export-one-page-to-share) for how to change these. Bundles and exported pages record the full paths of
 your run folders, so check Run details before sharing.
 
 ## What you can see

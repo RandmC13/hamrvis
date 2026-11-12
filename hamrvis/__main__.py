@@ -56,7 +56,7 @@ def main():
     r.add_argument("-o", "--out", required=True, help="bundle directory to write")
     r.add_argument("--layer-factor", type=int, help="per-layer cell size in atomic sites (1 = every atom; default 2, "
                                                      "more for large systems)")
-    r.add_argument("--tc", type=float, help="Curie temperature (K) for the analysis; default: inferred from the data")
+    r.add_argument("--tc", type=float, help="freezing temperature (K) for the write analysis; default: inferred from the data")
     r.add_argument("--name", help="run name shown in the viewer (default: the runs' common folder name)")
     for k, what in (("decision", "m_z|m| below this in the final direction = not yet decided"),
                     ("heated", "|m| below this at some point = the grain was melted"),
